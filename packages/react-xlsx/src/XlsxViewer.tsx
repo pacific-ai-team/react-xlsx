@@ -4715,6 +4715,23 @@ type CanvasDirtyRect = {
   width: number;
 };
 
+type CanvasStickyColumnHeaderCell = {
+  actualCol: number;
+  height: number;
+  isFrozen: boolean;
+  left: number;
+  localLeft: number;
+  width: number;
+};
+
+type CanvasStickyRowHeaderCell = {
+  actualRow: number;
+  height: number;
+  isFrozen: boolean;
+  localTop: number;
+  top: number;
+};
+
 function buildFullCanvasDirtyRect(width: number, height: number): CanvasDirtyRect[] {
   if (width <= 0 || height <= 0) {
     return [];
@@ -5890,8 +5907,10 @@ function XlsxGrid({
     left: null,
     top: null
   });
-  const topHeaderCanvasRef = React.useRef<HTMLCanvasElement>(null);
-  const leftHeaderCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const topFrozenHeaderCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const topScrollHeaderCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const leftFrozenHeaderCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const leftScrollHeaderCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const cornerHeaderCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const selectionOverlayRef = React.useRef<HTMLDivElement>(null);
   const activeValidationOverlayRef = React.useRef<HTMLDivElement>(null);
@@ -6219,17 +6238,31 @@ function XlsxGrid({
       liveZoomTranslateY
     );
 
-    const topHeaderCanvas = topHeaderCanvasRef.current;
-    if (topHeaderCanvas) {
-      topHeaderCanvas.style.transform = "";
-      topHeaderCanvas.style.willChange = "";
-    }
-
-    const leftHeaderCanvas = leftHeaderCanvasRef.current;
-    if (leftHeaderCanvas) {
-      leftHeaderCanvas.style.transform = "";
-      leftHeaderCanvas.style.willChange = "";
-    }
+    applyCanvasTransform(
+      topScrollHeaderCanvasRef.current,
+      scrollDeltaX + liveZoomTranslateX,
+      liveZoomTranslateY
+    );
+    applyCanvasTransform(
+      topFrozenHeaderCanvasRef.current,
+      liveZoomTranslateX,
+      liveZoomTranslateY
+    );
+    applyCanvasTransform(
+      leftScrollHeaderCanvasRef.current,
+      liveZoomTranslateX,
+      scrollDeltaY + liveZoomTranslateY
+    );
+    applyCanvasTransform(
+      leftFrozenHeaderCanvasRef.current,
+      liveZoomTranslateX,
+      liveZoomTranslateY
+    );
+    applyCanvasTransform(
+      cornerHeaderCanvasRef.current,
+      liveZoomTranslateX,
+      liveZoomTranslateY
+    );
   }, [zoomScale]);
   const updateLiveGestureZoomState = React.useCallback((
     nextState:
@@ -9516,6 +9549,58 @@ function XlsxGrid({
     rowPrefixSums,
     stickyTopByRow
   ]);
+  const canvasColumnHeaderCells = React.useMemo(
+    () =>
+      canvasVisibleColItems.flatMap<CanvasStickyColumnHeaderCell>((column) => {
+        const rect = resolveCanvasColumnHeaderRect(column.actualCol);
+        if (!rect) {
+          return [];
+        }
+
+        const isFrozen = stickyLeftByCol.has(column.actualCol);
+        return [{
+          actualCol: column.actualCol,
+          height: displayHeaderHeight,
+          isFrozen,
+          left: rect.left,
+          localLeft: rect.left - (isFrozen ? displayRowHeaderWidth : frozenPaneRight),
+          width: rect.width
+        }];
+      }),
+    [
+      canvasVisibleColItems,
+      displayHeaderHeight,
+      displayRowHeaderWidth,
+      frozenPaneRight,
+      resolveCanvasColumnHeaderRect,
+      stickyLeftByCol
+    ]
+  );
+  const canvasRowHeaderCells = React.useMemo(
+    () =>
+      canvasVisibleRowItems.flatMap<CanvasStickyRowHeaderCell>((row) => {
+        const rect = resolveCanvasRowHeaderRect(row.actualRow);
+        if (!rect) {
+          return [];
+        }
+
+        const isFrozen = stickyTopByRow.has(row.actualRow);
+        return [{
+          actualRow: row.actualRow,
+          height: rect.height,
+          isFrozen,
+          localTop: rect.top - (isFrozen ? displayHeaderHeight : frozenPaneBottom),
+          top: rect.top
+        }];
+      }),
+    [
+      canvasVisibleRowItems,
+      displayHeaderHeight,
+      frozenPaneBottom,
+      resolveCanvasRowHeaderRect,
+      stickyTopByRow
+    ]
+  );
   const resolveCanvasColumnResizeTarget = React.useCallback((clientX: number) => {
     if (!canResizeHeaders) {
       return null;
@@ -9527,19 +9612,14 @@ function XlsxGrid({
     }
 
     const localX = clientX - scrollerRect.left;
-    for (const column of canvasVisibleColItems) {
-      const rect = resolveCanvasColumnHeaderRect(column.actualCol);
-      if (!rect) {
-        continue;
-      }
-
-      if (Math.abs(localX - (rect.left + rect.width)) <= CANVAS_RESIZE_HIT_SLOP_PX) {
-        return { actualCol: column.actualCol, width: rect.width };
+    for (const column of canvasColumnHeaderCells) {
+      if (Math.abs(localX - (column.left + column.width)) <= CANVAS_RESIZE_HIT_SLOP_PX) {
+        return { actualCol: column.actualCol, width: column.width };
       }
     }
 
     return null;
-  }, [canResizeHeaders, canvasVisibleColItems, resolveCanvasColumnHeaderRect]);
+  }, [canResizeHeaders, canvasColumnHeaderCells]);
   const resolveCanvasColumnHeaderTarget = React.useCallback((clientX: number) => {
     const scrollerRect = scrollRef.current?.getBoundingClientRect();
     if (!scrollerRect) {
@@ -9547,18 +9627,14 @@ function XlsxGrid({
     }
 
     const localX = clientX - scrollerRect.left;
-    for (const column of canvasVisibleColItems) {
-      const rect = resolveCanvasColumnHeaderRect(column.actualCol);
-      if (!rect) {
-        continue;
-      }
-      if (localX >= rect.left && localX <= rect.left + rect.width) {
+    for (const column of canvasColumnHeaderCells) {
+      if (localX >= column.left && localX <= column.left + column.width) {
         return column.actualCol;
       }
     }
 
     return null;
-  }, [canvasVisibleColItems, resolveCanvasColumnHeaderRect]);
+  }, [canvasColumnHeaderCells]);
 
   const resolveCanvasRowResizeTarget = React.useCallback((clientY: number) => {
     if (!canResizeHeaders) {
@@ -9571,19 +9647,14 @@ function XlsxGrid({
     }
 
     const localY = clientY - scrollerRect.top;
-    for (const row of canvasVisibleRowItems) {
-      const rect = resolveCanvasRowHeaderRect(row.actualRow);
-      if (!rect) {
-        continue;
-      }
-
-      if (Math.abs(localY - (rect.top + rect.height)) <= CANVAS_RESIZE_HIT_SLOP_PX) {
-        return { actualRow: row.actualRow, height: rect.height };
+    for (const row of canvasRowHeaderCells) {
+      if (Math.abs(localY - (row.top + row.height)) <= CANVAS_RESIZE_HIT_SLOP_PX) {
+        return { actualRow: row.actualRow, height: row.height };
       }
     }
 
     return null;
-  }, [canResizeHeaders, canvasVisibleRowItems, resolveCanvasRowHeaderRect]);
+  }, [canResizeHeaders, canvasRowHeaderCells]);
   const resolveCanvasRowHeaderTarget = React.useCallback((clientY: number) => {
     const scrollerRect = scrollRef.current?.getBoundingClientRect();
     if (!scrollerRect) {
@@ -9591,18 +9662,14 @@ function XlsxGrid({
     }
 
     const localY = clientY - scrollerRect.top;
-    for (const row of canvasVisibleRowItems) {
-      const rect = resolveCanvasRowHeaderRect(row.actualRow);
-      if (!rect) {
-        continue;
-      }
-      if (localY >= rect.top && localY <= rect.top + rect.height) {
+    for (const row of canvasRowHeaderCells) {
+      if (localY >= row.top && localY <= row.top + row.height) {
         return row.actualRow;
       }
     }
 
     return null;
-  }, [canvasVisibleRowItems, resolveCanvasRowHeaderRect]);
+  }, [canvasRowHeaderCells]);
 
   const handleCanvasColumnHeaderPointerMove = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
     if (resizeStateRef.current?.type === "column") {
@@ -9985,6 +10052,10 @@ function XlsxGrid({
     const leftBodyCanvasHeight = scrollBodyCanvasHeight;
     const cornerBodyCanvasWidth = leftBodyCanvasWidth;
     const cornerBodyCanvasHeight = topBodyCanvasHeight;
+    const topFrozenHeaderCanvasWidth = leftBodyCanvasWidth;
+    const topScrollHeaderCanvasWidth = scrollBodyCanvasWidth;
+    const leftFrozenHeaderCanvasHeight = topBodyCanvasHeight;
+    const leftScrollHeaderCanvasHeight = scrollBodyCanvasHeight;
     const paneBounds: Record<FrozenDrawingPane, { height: number; left: number; top: number; width: number }> = {
       corner: {
         height: cornerBodyCanvasHeight,
@@ -10024,18 +10095,39 @@ function XlsxGrid({
           scroll: null,
           top: null
         };
-    const topHeaderContext = shouldRepaintHeaders
-      ? configureCanvas(topHeaderCanvasRef.current, bodyWidth, headerHeight, { clear: !canBlitTopHeader })
-      : null;
-    const leftHeaderContext = shouldRepaintHeaders
-      ? configureCanvas(leftHeaderCanvasRef.current, rowHeaderWidth, bodyHeight, { clear: !canBlitLeftHeader })
-      : null;
+    const topHeaderContexts = shouldRepaintHeaders
+      ? {
+          frozen: configureCanvas(topFrozenHeaderCanvasRef.current, topFrozenHeaderCanvasWidth, headerHeight),
+          scroll: configureCanvas(topScrollHeaderCanvasRef.current, topScrollHeaderCanvasWidth, headerHeight, { clear: !canBlitTopHeader })
+        }
+      : {
+          frozen: null,
+          scroll: null
+        };
+    const leftHeaderContexts = shouldRepaintHeaders
+      ? {
+          frozen: configureCanvas(leftFrozenHeaderCanvasRef.current, rowHeaderWidth, leftFrozenHeaderCanvasHeight),
+          scroll: configureCanvas(leftScrollHeaderCanvasRef.current, rowHeaderWidth, leftScrollHeaderCanvasHeight, { clear: !canBlitLeftHeader })
+        }
+      : {
+          frozen: null,
+          scroll: null
+        };
     const cornerContext = shouldRepaintHeaders
       ? configureCanvas(cornerHeaderCanvasRef.current, rowHeaderWidth, headerHeight)
       : null;
     if (
       (shouldRepaintBody && (!bodyContexts.scroll || !bodyContexts.top || !bodyContexts.left || !bodyContexts.corner))
-      || (shouldRepaintHeaders && (!topHeaderContext || !leftHeaderContext || !cornerContext))
+      || (
+        shouldRepaintHeaders
+        && (
+          !cornerContext
+          || (topFrozenHeaderCanvasWidth > 0 && !topHeaderContexts.frozen)
+          || (topScrollHeaderCanvasWidth > 0 && !topHeaderContexts.scroll)
+          || (leftFrozenHeaderCanvasHeight > 0 && !leftHeaderContexts.frozen)
+          || (leftScrollHeaderCanvasHeight > 0 && !leftHeaderContexts.scroll)
+        )
+      )
     ) {
       return;
     }
@@ -10068,8 +10160,8 @@ function XlsxGrid({
       scroll: [],
       top: []
     };
-    let topHeaderDirtyRects = buildFullCanvasDirtyRect(bodyWidth, headerHeight);
-    let leftHeaderDirtyRects = buildFullCanvasDirtyRect(rowHeaderWidth, bodyHeight);
+    let topScrollHeaderDirtyRects = buildFullCanvasDirtyRect(topScrollHeaderCanvasWidth, headerHeight);
+    let leftScrollHeaderDirtyRects = buildFullCanvasDirtyRect(rowHeaderWidth, leftScrollHeaderCanvasHeight);
 
     const cellPaneOrder: FrozenDrawingPane[] = ["scroll", "top", "left", "corner"];
     if (shouldRepaintBody) {
@@ -10626,107 +10718,162 @@ function XlsxGrid({
       }
     }
 
-    if (shouldRepaintHeaders && topHeaderContext && leftHeaderContext && cornerContext) {
+    if (shouldRepaintHeaders && cornerContext) {
+      const topFrozenHeaderContext = topHeaderContexts.frozen;
+      const topScrollHeaderContext = topHeaderContexts.scroll;
+      const leftFrozenHeaderContext = leftHeaderContexts.frozen;
+      const leftScrollHeaderContext = leftHeaderContexts.scroll;
+
       if (canBlitTopHeader) {
         const bufferCanvas = getHeaderBlitBufferCanvas("top");
-        if (bufferCanvas) {
+        if (bufferCanvas && topScrollHeaderContext && topScrollHeaderCanvasRef.current) {
           const blittedDirtyRects = blitCanvasWithScrollDelta(
-            topHeaderCanvasRef.current!,
-            topHeaderContext,
+            topScrollHeaderCanvasRef.current,
+            topScrollHeaderContext,
             bufferCanvas,
             dpr,
-            bodyWidth,
+            topScrollHeaderCanvasWidth,
             headerHeight,
             drawingViewport.left - previousPaintedViewport.left,
             0
           );
           if (blittedDirtyRects) {
-            topHeaderDirtyRects = blittedDirtyRects;
+            topScrollHeaderDirtyRects = blittedDirtyRects;
           }
         }
       }
       if (canBlitLeftHeader) {
         const bufferCanvas = getHeaderBlitBufferCanvas("left");
-        if (bufferCanvas) {
+        if (bufferCanvas && leftScrollHeaderContext && leftScrollHeaderCanvasRef.current) {
           const blittedDirtyRects = blitCanvasWithScrollDelta(
-            leftHeaderCanvasRef.current!,
-            leftHeaderContext,
+            leftScrollHeaderCanvasRef.current,
+            leftScrollHeaderContext,
             bufferCanvas,
             dpr,
             rowHeaderWidth,
-            bodyHeight,
+            leftScrollHeaderCanvasHeight,
             0,
             drawingViewport.top - previousPaintedViewport.top
           );
           if (blittedDirtyRects) {
-            leftHeaderDirtyRects = blittedDirtyRects;
+            leftScrollHeaderDirtyRects = blittedDirtyRects;
           }
         }
       }
 
-      topHeaderContext.fillStyle = palette.headerSurface;
-      for (const dirtyRect of topHeaderDirtyRects) {
-        topHeaderContext.fillRect(dirtyRect.left, dirtyRect.top, dirtyRect.width, dirtyRect.height);
+      if (topFrozenHeaderContext && topFrozenHeaderCanvasWidth > 0) {
+        topFrozenHeaderContext.fillStyle = palette.headerSurface;
+        topFrozenHeaderContext.fillRect(0, 0, topFrozenHeaderCanvasWidth, headerHeight);
       }
-      topHeaderContext.strokeStyle = palette.border;
-      topHeaderContext.lineWidth = 1;
-      for (const colItem of canvasVisibleColItems) {
-        const rect = resolveCanvasColumnHeaderRect(colItem.actualCol);
+      if (topScrollHeaderContext && topScrollHeaderCanvasWidth > 0) {
+        topScrollHeaderContext.fillStyle = palette.headerSurface;
+        for (const dirtyRect of topScrollHeaderDirtyRects) {
+          topScrollHeaderContext.fillRect(dirtyRect.left, dirtyRect.top, dirtyRect.width, dirtyRect.height);
+        }
+      }
+      if (topFrozenHeaderContext) {
+        topFrozenHeaderContext.strokeStyle = palette.border;
+        topFrozenHeaderContext.lineWidth = 1;
+      }
+      if (topScrollHeaderContext) {
+        topScrollHeaderContext.strokeStyle = palette.border;
+        topScrollHeaderContext.lineWidth = 1;
+      }
+      for (const column of canvasColumnHeaderCells) {
+        const paneContext = column.isFrozen ? topFrozenHeaderContext : topScrollHeaderContext;
+        if (!paneContext) {
+          continue;
+        }
         if (
-          !rect
-          || rect.left + rect.width < displayRowHeaderWidth
-          || rect.left > bodyWidth
-          || !intersectsCanvasDirtyRects(rect.left, 0, rect.width, headerHeight, topHeaderDirtyRects)
+          column.localLeft + column.width < 0
+          || column.localLeft > (column.isFrozen ? topFrozenHeaderCanvasWidth : topScrollHeaderCanvasWidth)
         ) {
           continue;
         }
-        const selected = normalizedVisibleRange && colItem.actualCol >= normalizedVisibleRange.start.col && colItem.actualCol <= normalizedVisibleRange.end.col;
-        topHeaderContext.fillStyle = selected ? selectionHeaderSurface : palette.headerSurface;
-        topHeaderContext.fillRect(rect.left, 0, rect.width, headerHeight);
-        topHeaderContext.strokeStyle = palette.border;
-        topHeaderContext.beginPath();
-        topHeaderContext.moveTo(rect.left + rect.width - 0.5, 0);
-        topHeaderContext.lineTo(rect.left + rect.width - 0.5, headerHeight);
-        topHeaderContext.moveTo(rect.left, headerHeight - 0.5);
-        topHeaderContext.lineTo(rect.left + rect.width, headerHeight - 0.5);
-        topHeaderContext.stroke();
-        topHeaderContext.font = `600 ${11 * zoomFactor}px ui-sans-serif, system-ui, sans-serif`;
-        topHeaderContext.fillStyle = palette.mutedText;
-        topHeaderContext.textAlign = "center";
-        topHeaderContext.textBaseline = "middle";
-        topHeaderContext.fillText(columnLabel(colItem.actualCol), rect.left + (rect.width / 2), headerHeight / 2);
+        if (
+          !column.isFrozen
+          && !intersectsCanvasDirtyRects(column.localLeft, 0, column.width, column.height, topScrollHeaderDirtyRects)
+        ) {
+          continue;
+        }
+
+        const selected =
+          normalizedVisibleRange
+          && column.actualCol >= normalizedVisibleRange.start.col
+          && column.actualCol <= normalizedVisibleRange.end.col;
+        paneContext.fillStyle = selected ? selectionHeaderSurface : palette.headerSurface;
+        paneContext.fillRect(column.localLeft, 0, column.width, column.height);
+        paneContext.strokeStyle = palette.border;
+        paneContext.beginPath();
+        paneContext.moveTo(column.localLeft + column.width - 0.5, 0);
+        paneContext.lineTo(column.localLeft + column.width - 0.5, column.height);
+        paneContext.moveTo(column.localLeft, column.height - 0.5);
+        paneContext.lineTo(column.localLeft + column.width, column.height - 0.5);
+        paneContext.stroke();
+        paneContext.font = `600 ${11 * zoomFactor}px ui-sans-serif, system-ui, sans-serif`;
+        paneContext.fillStyle = palette.mutedText;
+        paneContext.textAlign = "center";
+        paneContext.textBaseline = "middle";
+        paneContext.fillText(
+          columnLabel(column.actualCol),
+          column.localLeft + (column.width / 2),
+          column.height / 2
+        );
       }
 
-      leftHeaderContext.fillStyle = palette.rowHeaderSurface;
-      for (const dirtyRect of leftHeaderDirtyRects) {
-        leftHeaderContext.fillRect(dirtyRect.left, dirtyRect.top, dirtyRect.width, dirtyRect.height);
+      if (leftFrozenHeaderContext && leftFrozenHeaderCanvasHeight > 0) {
+        leftFrozenHeaderContext.fillStyle = palette.rowHeaderSurface;
+        leftFrozenHeaderContext.fillRect(0, 0, rowHeaderWidth, leftFrozenHeaderCanvasHeight);
       }
-      leftHeaderContext.strokeStyle = palette.border;
-      leftHeaderContext.lineWidth = 1;
-      for (const rowItem of canvasVisibleRowItems) {
-        const rect = resolveCanvasRowHeaderRect(rowItem.actualRow);
+      if (leftScrollHeaderContext && leftScrollHeaderCanvasHeight > 0) {
+        leftScrollHeaderContext.fillStyle = palette.rowHeaderSurface;
+        for (const dirtyRect of leftScrollHeaderDirtyRects) {
+          leftScrollHeaderContext.fillRect(dirtyRect.left, dirtyRect.top, dirtyRect.width, dirtyRect.height);
+        }
+      }
+      if (leftFrozenHeaderContext) {
+        leftFrozenHeaderContext.strokeStyle = palette.border;
+        leftFrozenHeaderContext.lineWidth = 1;
+      }
+      if (leftScrollHeaderContext) {
+        leftScrollHeaderContext.strokeStyle = palette.border;
+        leftScrollHeaderContext.lineWidth = 1;
+      }
+      for (const row of canvasRowHeaderCells) {
+        const paneContext = row.isFrozen ? leftFrozenHeaderContext : leftScrollHeaderContext;
+        if (!paneContext) {
+          continue;
+        }
         if (
-          !rect
-          || rect.top + rect.height < displayHeaderHeight
-          || rect.top > bodyHeight
-          || !intersectsCanvasDirtyRects(0, rect.top, rowHeaderWidth, rect.height, leftHeaderDirtyRects)
+          row.localTop + row.height < 0
+          || row.localTop > (row.isFrozen ? leftFrozenHeaderCanvasHeight : leftScrollHeaderCanvasHeight)
         ) {
           continue;
         }
-        const selected = normalizedVisibleRange && rowItem.actualRow >= normalizedVisibleRange.start.row && rowItem.actualRow <= normalizedVisibleRange.end.row;
-        leftHeaderContext.fillStyle = selected ? selectionHeaderSurface : palette.rowHeaderSurface;
-        leftHeaderContext.fillRect(0, rect.top, rowHeaderWidth, rect.height);
-        leftHeaderContext.beginPath();
-        leftHeaderContext.moveTo(0, rect.top + rect.height - 0.5);
-        leftHeaderContext.lineTo(rowHeaderWidth, rect.top + rect.height - 0.5);
-        leftHeaderContext.moveTo(rowHeaderWidth - 0.5, rect.top);
-        leftHeaderContext.lineTo(rowHeaderWidth - 0.5, rect.top + rect.height);
-        leftHeaderContext.stroke();
-        leftHeaderContext.font = `600 ${11 * zoomFactor}px ui-sans-serif, system-ui, sans-serif`;
-        leftHeaderContext.fillStyle = palette.mutedText;
-        leftHeaderContext.textAlign = "center";
-        leftHeaderContext.textBaseline = "middle";
-        leftHeaderContext.fillText(`${rowItem.actualRow + 1}`, rowHeaderWidth / 2, rect.top + (rect.height / 2));
+        if (
+          !row.isFrozen
+          && !intersectsCanvasDirtyRects(0, row.localTop, rowHeaderWidth, row.height, leftScrollHeaderDirtyRects)
+        ) {
+          continue;
+        }
+
+        const selected =
+          normalizedVisibleRange
+          && row.actualRow >= normalizedVisibleRange.start.row
+          && row.actualRow <= normalizedVisibleRange.end.row;
+        paneContext.fillStyle = selected ? selectionHeaderSurface : palette.rowHeaderSurface;
+        paneContext.fillRect(0, row.localTop, rowHeaderWidth, row.height);
+        paneContext.beginPath();
+        paneContext.moveTo(0, row.localTop + row.height - 0.5);
+        paneContext.lineTo(rowHeaderWidth, row.localTop + row.height - 0.5);
+        paneContext.moveTo(rowHeaderWidth - 0.5, row.localTop);
+        paneContext.lineTo(rowHeaderWidth - 0.5, row.localTop + row.height);
+        paneContext.stroke();
+        paneContext.font = `600 ${11 * zoomFactor}px ui-sans-serif, system-ui, sans-serif`;
+        paneContext.fillStyle = palette.mutedText;
+        paneContext.textAlign = "center";
+        paneContext.textBaseline = "middle";
+        paneContext.fillText(`${row.actualRow + 1}`, rowHeaderWidth / 2, row.localTop + (row.height / 2));
       }
 
       cornerContext.fillStyle = palette.rowHeaderSurface;
@@ -10751,7 +10898,9 @@ function XlsxGrid({
   }, [
     activeSheet,
     applyCanvasViewportCompensation,
+    canvasColumnHeaderCells,
     canvasPaneAxisItems,
+    canvasRowHeaderCells,
     canvasVisibleColItems,
     canvasVisibleRowItems,
     colIndexByActual,
@@ -10766,13 +10915,13 @@ function XlsxGrid({
     drawingViewport.height,
     drawingViewport.width,
     experimentalCanvas,
+    frozenPaneBottom,
+    frozenPaneRight,
     getCellData,
     getBodyBlitBufferCanvas,
     getHeaderBlitBufferCanvas,
     palette,
     resolveCellDisplayRect,
-    resolveCanvasColumnHeaderRect,
-    resolveCanvasRowHeaderRect,
     resolveMergeAnchorCell,
     resizeGuide,
     rowIndexByActual,
@@ -11126,6 +11275,10 @@ function XlsxGrid({
   const leftBodyCanvasHeight = scrollBodyCanvasHeight;
   const cornerBodyCanvasWidth = leftBodyCanvasWidth;
   const cornerBodyCanvasHeight = topBodyCanvasHeight;
+  const topFrozenHeaderCanvasWidth = leftBodyCanvasWidth;
+  const topScrollHeaderCanvasWidth = scrollBodyCanvasWidth;
+  const leftFrozenHeaderCanvasHeight = topBodyCanvasHeight;
+  const leftScrollHeaderCanvasHeight = scrollBodyCanvasHeight;
   const canvasBodyBaseStyle: React.CSSProperties = {
     cursor: "cell",
     pointerEvents: "auto",
@@ -11161,22 +11314,38 @@ function XlsxGrid({
     top: displayHeaderHeight,
     zIndex: 31
   };
-  const canvasTopHeaderStyle: React.CSSProperties = {
+  const canvasHeaderBaseStyle: React.CSSProperties = {
     cursor: "default",
-    display: drawingViewport.width > 0 && drawingViewport.height > 0 ? "block" : "none",
-    left: 0,
     pointerEvents: "auto",
     position: "absolute",
+    transformOrigin: "0 0"
+  };
+  const canvasTopFrozenHeaderStyle: React.CSSProperties = {
+    ...canvasHeaderBaseStyle,
+    display: topFrozenHeaderCanvasWidth > 0 && drawingViewport.height > 0 ? "block" : "none",
+    left: displayRowHeaderWidth,
+    top: 0,
+    zIndex: canvasHeaderOverlayZIndex + 1
+  };
+  const canvasTopScrollHeaderStyle: React.CSSProperties = {
+    ...canvasHeaderBaseStyle,
+    display: topScrollHeaderCanvasWidth > 0 && drawingViewport.height > 0 ? "block" : "none",
+    left: frozenPaneRight,
     top: 0,
     zIndex: canvasHeaderOverlayZIndex
   };
-  const canvasLeftHeaderStyle: React.CSSProperties = {
-    cursor: "default",
-    display: drawingViewport.width > 0 && drawingViewport.height > 0 ? "block" : "none",
+  const canvasLeftFrozenHeaderStyle: React.CSSProperties = {
+    ...canvasHeaderBaseStyle,
+    display: leftFrozenHeaderCanvasHeight > 0 && drawingViewport.width > 0 ? "block" : "none",
     left: 0,
-    pointerEvents: "auto",
-    position: "absolute",
-    top: 0,
+    top: displayHeaderHeight,
+    zIndex: canvasHeaderOverlayZIndex + 1
+  };
+  const canvasLeftScrollHeaderStyle: React.CSSProperties = {
+    ...canvasHeaderBaseStyle,
+    display: leftScrollHeaderCanvasHeight > 0 && drawingViewport.width > 0 ? "block" : "none",
+    left: 0,
+    top: frozenPaneBottom,
     zIndex: canvasHeaderOverlayZIndex
   };
   const canvasCornerHeaderStyle: React.CSSProperties = {
@@ -11185,6 +11354,7 @@ function XlsxGrid({
     pointerEvents: "none",
     position: "absolute",
     top: 0,
+    transformOrigin: "0 0",
     zIndex: canvasHeaderOverlayZIndex + 1
   };
   const editingOverlayRect = experimentalCanvas && editingCell
@@ -12519,18 +12689,32 @@ function XlsxGrid({
                 </div>
                 <div style={canvasHeaderViewportLayerStyle}>
                   <canvas
-                    ref={topHeaderCanvasRef}
+                    ref={topFrozenHeaderCanvasRef}
                     onPointerLeave={handleCanvasHeaderPointerLeave}
                     onPointerMove={handleCanvasColumnHeaderPointerMove}
                     onPointerDown={handleCanvasColumnHeaderPointerDown}
-                    style={canvasTopHeaderStyle}
+                    style={canvasTopFrozenHeaderStyle}
                   />
                   <canvas
-                    ref={leftHeaderCanvasRef}
+                    ref={topScrollHeaderCanvasRef}
+                    onPointerLeave={handleCanvasHeaderPointerLeave}
+                    onPointerMove={handleCanvasColumnHeaderPointerMove}
+                    onPointerDown={handleCanvasColumnHeaderPointerDown}
+                    style={canvasTopScrollHeaderStyle}
+                  />
+                  <canvas
+                    ref={leftFrozenHeaderCanvasRef}
                     onPointerLeave={handleCanvasHeaderPointerLeave}
                     onPointerMove={handleCanvasRowHeaderPointerMove}
                     onPointerDown={handleCanvasRowHeaderPointerDown}
-                    style={canvasLeftHeaderStyle}
+                    style={canvasLeftFrozenHeaderStyle}
+                  />
+                  <canvas
+                    ref={leftScrollHeaderCanvasRef}
+                    onPointerLeave={handleCanvasHeaderPointerLeave}
+                    onPointerMove={handleCanvasRowHeaderPointerMove}
+                    onPointerDown={handleCanvasRowHeaderPointerDown}
+                    style={canvasLeftScrollHeaderStyle}
                   />
                   <canvas ref={cornerHeaderCanvasRef} style={canvasCornerHeaderStyle} />
                 </div>
