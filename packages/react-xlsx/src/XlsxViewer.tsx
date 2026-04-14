@@ -5347,6 +5347,7 @@ type GridRowProps = {
   actualRow: number;
   editingCell: XlsxCellAddress | null;
   editingValue: string;
+  frozenRowHeaderZIndex: number;
   getCellData: (row: number, col: number) => CellRenderData;
   headerLabelLiveScale: number;
   leadingSpacerWidth: number;
@@ -5363,6 +5364,7 @@ type GridRowProps = {
   readOnly: boolean;
   renderCellAdornment?: (cell: XlsxCellAddress) => React.ReactNode;
   rowHeight: number;
+  rowHeaderZIndex: number;
   rowHeaderWidth: number;
   stickyLeftByCol: Map<number, number>;
   stickyTop?: number;
@@ -5375,6 +5377,7 @@ function GridRow({
   actualRow,
   editingCell,
   editingValue,
+  frozenRowHeaderZIndex,
   getCellData,
   headerLabelLiveScale,
   leadingSpacerWidth,
@@ -5391,6 +5394,7 @@ function GridRow({
   readOnly,
   renderCellAdornment,
   rowHeight,
+  rowHeaderZIndex,
   rowHeaderWidth,
   stickyLeftByCol,
   stickyTop,
@@ -5423,7 +5427,7 @@ function GridRow({
           textAlign: "center",
           userSelect: "none",
           width: rowHeaderWidth,
-          zIndex: stickyTop !== undefined ? 45 : 35
+          zIndex: stickyTop !== undefined ? frozenRowHeaderZIndex : rowHeaderZIndex
         }}
       >
         <div style={{ position: "relative" }}>
@@ -7597,7 +7601,7 @@ function XlsxGrid({
       hitCell && rowIndexByActual.has(hitCell.row)
         ? hitCell.row
         : geometryCell?.row;
-    const actualCol = geometryCell?.col ?? hitCell?.col;
+    const actualCol = hitCell?.col ?? geometryCell?.col;
     if (actualRow === undefined || actualCol === undefined) {
       return null;
     }
@@ -10876,7 +10880,7 @@ function XlsxGrid({
         paneContext.fillText(`${row.actualRow + 1}`, rowHeaderWidth / 2, row.localTop + (row.height / 2));
       }
 
-      cornerContext.fillStyle = palette.rowHeaderSurface;
+      cornerContext.fillStyle = palette.headerSurface;
       cornerContext.fillRect(0, 0, rowHeaderWidth, headerHeight);
       cornerContext.strokeStyle = palette.border;
       cornerContext.lineWidth = 1;
@@ -11219,7 +11223,18 @@ function XlsxGrid({
     : "none";
   const rowColSpan = renderedCols.length + 1 + (leadingColumnSpacerWidth > 0 ? 1 : 0) + (trailingColumnSpacerWidth > 0 ? 1 : 0);
   const gutterSeparatorShadow = `inset -1px 0 0 ${palette.border}, inset 0 -1px 0 ${palette.border}`;
-  const canvasHeaderOverlayZIndex = 100000;
+  const maxDrawingOverlayZIndex = Math.max(
+    0,
+    ...shapes.map((shape) => shape.zIndex + 20),
+    ...formControls.map((control) => control.zIndex + 20),
+    ...images.map((image) => image.zIndex + 22),
+    ...charts.map((chart) => chart.zIndex + 22)
+  );
+  const rowHeaderOverlayZIndex = Math.max(35, maxDrawingOverlayZIndex + 1);
+  const canvasHeaderOverlayZIndex = Math.max(50, rowHeaderOverlayZIndex + 1);
+  const stickyHeaderOverlayZIndex = canvasHeaderOverlayZIndex + 1;
+  const cornerHeaderOverlayZIndex = canvasHeaderOverlayZIndex + 2;
+  const frozenRowHeaderOverlayZIndex = rowHeaderOverlayZIndex;
   const headerCellStyle = scaleCssProperties({
     backgroundColor: palette.headerSurface,
     borderBottom: "none",
@@ -11236,7 +11251,7 @@ function XlsxGrid({
     top: 0,
     userSelect: "none",
     whiteSpace: "nowrap",
-    zIndex: 50
+    zIndex: canvasHeaderOverlayZIndex
   }, zoomFactor);
   const columnResizeHandleStyle = scaleCssProperties({
     backgroundColor: "transparent",
@@ -11325,7 +11340,7 @@ function XlsxGrid({
     display: topFrozenHeaderCanvasWidth > 0 && drawingViewport.height > 0 ? "block" : "none",
     left: displayRowHeaderWidth,
     top: 0,
-    zIndex: canvasHeaderOverlayZIndex + 1
+    zIndex: stickyHeaderOverlayZIndex
   };
   const canvasTopScrollHeaderStyle: React.CSSProperties = {
     ...canvasHeaderBaseStyle,
@@ -11339,7 +11354,7 @@ function XlsxGrid({
     display: leftFrozenHeaderCanvasHeight > 0 && drawingViewport.width > 0 ? "block" : "none",
     left: 0,
     top: displayHeaderHeight,
-    zIndex: canvasHeaderOverlayZIndex + 1
+    zIndex: stickyHeaderOverlayZIndex
   };
   const canvasLeftScrollHeaderStyle: React.CSSProperties = {
     ...canvasHeaderBaseStyle,
@@ -11355,7 +11370,7 @@ function XlsxGrid({
     position: "absolute",
     top: 0,
     transformOrigin: "0 0",
-    zIndex: canvasHeaderOverlayZIndex + 1
+    zIndex: cornerHeaderOverlayZIndex
   };
   const editingOverlayRect = experimentalCanvas && editingCell
     ? resolveCellDisplayRect(editingCell)
@@ -12809,7 +12824,7 @@ function XlsxGrid({
                   ))}
                   {trailingColumnSpacerWidth > 0 ? <col style={{ width: trailingColumnSpacerWidth }} /> : null}
                 </colgroup>
-                <thead style={{ position: "sticky", top: 0, zIndex: 50 }}>
+                <thead style={{ position: "sticky", top: 0, zIndex: canvasHeaderOverlayZIndex }}>
                   <tr>
                     <th
                       style={{
@@ -12817,7 +12832,7 @@ function XlsxGrid({
                         backgroundColor: palette.headerSurface,
                         left: 0,
                         width: displayRowHeaderWidth,
-                        zIndex: 60
+                        zIndex: cornerHeaderOverlayZIndex
                       }}
                     />
                     {leadingColumnSpacerWidth > 0 ? (
@@ -12832,7 +12847,7 @@ function XlsxGrid({
                         style={{
                           ...headerCellStyle,
                           left: stickyLeftByCol.get(column.actualCol),
-                          zIndex: stickyLeftByCol.has(column.actualCol) ? 55 : headerCellStyle.zIndex
+                          zIndex: stickyLeftByCol.has(column.actualCol) ? stickyHeaderOverlayZIndex : headerCellStyle.zIndex
                         }}
                       >
                         <div style={{ position: "relative" }}>
@@ -12891,6 +12906,7 @@ function XlsxGrid({
                           actualRow={actualRow}
                           editingCell={editingCell}
                           editingValue={editingValue}
+                          frozenRowHeaderZIndex={frozenRowHeaderOverlayZIndex}
                           getCellData={getCellData}
                           key={virtualRow.key}
                           leadingSpacerWidth={leadingColumnSpacerWidth}
@@ -12908,6 +12924,7 @@ function XlsxGrid({
                           readOnly={readOnly}
                           renderCellAdornment={renderCellAdornment}
                           rowHeight={virtualRow.size}
+                          rowHeaderZIndex={rowHeaderOverlayZIndex}
                           rowHeaderWidth={displayRowHeaderWidth}
                           stickyLeftByCol={stickyLeftByCol}
                           stickyTop={stickyTopByRow.get(actualRow)}

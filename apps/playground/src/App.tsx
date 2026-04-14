@@ -1,5 +1,4 @@
 import * as React from "react";
-import { useTheme } from "next-themes";
 import {
   useXlsxViewer,
   useXlsxViewerController,
@@ -10,25 +9,13 @@ import {
   XlsxViewer,
   XlsxViewerProvider
 } from "@extend-ai/react-xlsx";
-import {
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  Download,
-  FileSpreadsheet,
-  Link2,
-  Minus,
-  Moon,
-  Plus,
-  Redo2,
-  RefreshCcw,
-  Sun,
-  Trash2,
-  Undo2,
-  Upload
-} from "lucide-react";
 import { Button } from "./components/ui/button";
 import { ButtonGroup } from "./components/ui/button-group";
+import {
+  PlaygroundCustomizerPanel,
+  PlaygroundIcon,
+  usePlaygroundCustomizer,
+} from "./components/playground-customizer";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "./components/ui/dropdown-menu";
 import { Input } from "./components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
@@ -52,24 +39,25 @@ type ViewerSource =
   | null;
 
 function ThemeToggle() {
-  const { resolvedTheme, setTheme, theme } = useTheme();
-  const [ready, setReady] = React.useState(false);
-
-  React.useEffect(() => {
-    setReady(true);
-  }, []);
-
-  const currentTheme = (resolvedTheme ?? theme ?? "light") as "light" | "dark";
-  const isDark = currentTheme === "dark";
+  const {
+    resolvedAppearance,
+    settings,
+    updateSettings,
+  } = usePlaygroundCustomizer();
+  const isDark = resolvedAppearance === "dark";
 
   return (
     <Button
       aria-label="Toggle theme"
-      onClick={() => setTheme(isDark ? "light" : "dark")}
+      onClick={() =>
+        updateSettings({
+          appearance: settings.appearance === "system" ? (isDark ? "light" : "dark") : isDark ? "light" : "dark",
+        })
+      }
       size="icon-sm"
       variant="outline"
     >
-      {ready && isDark ? <Sun /> : <Moon />}
+      {isDark ? <PlaygroundIcon name="sun" /> : <PlaygroundIcon name="moon" />}
     </Button>
   );
 }
@@ -214,7 +202,7 @@ function WorkbookToolbar({
       <div className="flex min-h-10 items-center justify-between gap-3 border-b px-4 py-1.5">
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex size-6 items-center justify-center rounded-md bg-emerald-600 text-white shadow-sm">
-            <FileSpreadsheet className="size-3.5" />
+            <PlaygroundIcon className="size-3.5" name="spreadsheet" />
           </div>
           <div className="truncate text-sm font-medium">{displayFileName}</div>
           {activeSheet ? (
@@ -253,6 +241,7 @@ function WorkbookToolbar({
             />
           </div>
           <ThemeToggle />
+          <PlaygroundCustomizerPanel />
         </div>
       </div>
 
@@ -260,19 +249,19 @@ function WorkbookToolbar({
       <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-2 py-2">
         <ToolbarCluster>
           <Button onClick={onOpenFile} size="sm">
-            <Upload />
+            <PlaygroundIcon name="open" />
             Open
           </Button>
           <Button disabled={!canDownload} onClick={download} size="sm" variant="outline">
-            <Download />
+            <PlaygroundIcon name="download" />
             Source
           </Button>
           <Button disabled={!canExport} onClick={exportXlsx} size="sm" variant="outline">
-            <Download />
+            <PlaygroundIcon name="download" />
             XLSX
           </Button>
           <Button disabled={!canExport} onClick={exportCsv} size="sm" variant="outline">
-            <Download />
+            <PlaygroundIcon name="download" />
             CSV
           </Button>
         </ToolbarCluster>
@@ -291,7 +280,7 @@ function WorkbookToolbar({
             value={remoteUrl}
           />
           <Button onClick={onLoadUrl} size="sm" variant="outline">
-            <Link2 />
+            <PlaygroundIcon name="link" />
             Load
           </Button>
           <Button onClick={onLoadExampleUrl} size="sm" variant="outline">
@@ -302,10 +291,10 @@ function WorkbookToolbar({
         <ToolbarCluster>
           <ButtonGroup>
             <Button aria-label="Undo" disabled={!canUndo} onClick={undo} size="sm" variant="outline">
-              <Undo2 />
+              <PlaygroundIcon name="undo" />
             </Button>
             <Button aria-label="Redo" disabled={!canRedo} onClick={redo} size="sm" variant="outline">
-              <Redo2 />
+              <PlaygroundIcon name="redo" />
             </Button>
           </ButtonGroup>
         </ToolbarCluster>
@@ -321,17 +310,17 @@ function WorkbookToolbar({
 
         <ToolbarCluster>
           <Button aria-label="Add sheet" disabled={!hasWorkbook || isReadOnly} onClick={() => addSheet()} size="sm" variant="outline">
-            <Plus />
+            <PlaygroundIcon name="plus" />
           </Button>
           <Button aria-label="Delete active sheet" disabled={sheets.length <= 1 || isReadOnly} onClick={removeActiveSheet} size="sm" variant="outline">
-            <Trash2 />
+            <PlaygroundIcon name="trash" />
           </Button>
           <ButtonGroup>
             <Button aria-label="Previous sheet" disabled={!activeSheet || activeSheetIndex <= 0} onClick={() => setActiveSheetIndex(activeSheetIndex - 1)} size="sm" variant="outline">
-              <ChevronLeft />
+              <PlaygroundIcon name="chevron-left" />
             </Button>
             <Button aria-label="Next sheet" disabled={!activeSheet || activeSheetIndex >= sheets.length - 1} onClick={() => setActiveSheetIndex(activeSheetIndex + 1)} size="sm" variant="outline">
-              <ChevronRight />
+              <PlaygroundIcon name="chevron-right" />
             </Button>
           </ButtonGroup>
           <Select
@@ -373,7 +362,7 @@ function WorkbookToolbar({
         <ToolbarCluster>
           <ButtonGroup>
             <Button aria-label="Zoom out" disabled={!hasWorkbook || !canZoomOut} onClick={zoomOut} size="sm" variant="outline">
-              <Minus />
+              <PlaygroundIcon name="minus" />
             </Button>
             <Select
               disabled={!hasWorkbook}
@@ -392,7 +381,7 @@ function WorkbookToolbar({
               </SelectContent>
             </Select>
             <Button aria-label="Zoom in" disabled={!hasWorkbook || !canZoomIn} onClick={zoomIn} size="sm" variant="outline">
-              <Plus />
+              <PlaygroundIcon name="plus" />
             </Button>
           </ButtonGroup>
           <Button
@@ -407,11 +396,11 @@ function WorkbookToolbar({
 
         <ToolbarCluster>
           <Button disabled={!canExport} onClick={recalculate} size="sm" variant="outline">
-            <RefreshCcw />
+            <PlaygroundIcon name="refresh" />
             Recalc
           </Button>
           <Button disabled={!hasWorkbook} onClick={onClear} size="sm" variant="outline">
-            <Trash2 />
+            <PlaygroundIcon name="trash" />
             Clear
           </Button>
         </ToolbarCluster>
@@ -753,7 +742,7 @@ export function App() {
                         render={<Button size="icon-xs" variant="ghost" />}
                         {...triggerProps}
                       >
-                        <ChevronDown className="size-3" />
+                        <PlaygroundIcon className="size-3" name="chevron-down" />
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-40">
                         <DropdownMenuGroup>
