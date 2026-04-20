@@ -2,6 +2,7 @@ import type { Workbook } from "@dukelib/sheets-wasm";
 import { loadWorkbookChartAssets } from "./charts";
 import { parseWorkbookChartStyleAssets, parseWorkbookStructureAssets, resolveSheetColumnWidthPixels } from "./images";
 import type { WorkbookStructureAssets } from "./images";
+import { safeCalculate } from "./safe-calculate";
 import { getSheetsWasmModule } from "./wasm";
 import type {
   XlsxChart,
@@ -499,16 +500,20 @@ async function loadWorkbook(buffer: ArrayBuffer, skipXmlParsing = false, showHid
   const wasmModule = await getSheetsWasmModule();
   const bytes = new Uint8Array(buffer);
   const effectiveSkipXmlParsing = shouldSkipXmlParsingForWorkbook(bytes, skipXmlParsing);
-  const nextWorkbook = wasmModule.Workbook.fromBytes(bytes);
+  let activeWorkbook = wasmModule.Workbook.fromBytes(bytes);
   let totalFormulas = 0;
-  for (let index = 0; index < nextWorkbook.sheetCount; index += 1) {
-    totalFormulas += nextWorkbook.getSheet(index).formulaCount;
+  for (let index = 0; index < activeWorkbook.sheetCount; index += 1) {
+    totalFormulas += activeWorkbook.getSheet(index).formulaCount;
   }
 
   if (totalFormulas <= FORMULA_COUNT_THRESHOLD) {
-    nextWorkbook.calculate();
+    const result = safeCalculate(activeWorkbook, {
+      reparse: () => wasmModule.Workbook.fromBytes(bytes)
+    });
+    activeWorkbook = result.workbook;
   }
 
+  const nextWorkbook = activeWorkbook;
   const shouldUseFastStructureParse =
     bytes.byteLength >= FAST_STRUCTURE_PARSE_THRESHOLD_BYTES && totalFormulas <= FORMULA_COUNT_THRESHOLD;
   const structureAssets = effectiveSkipXmlParsing || shouldUseFastStructureParse
@@ -554,15 +559,19 @@ async function parseCharts(buffer: ArrayBuffer, skipXmlParsing = false, showHidd
   const wasmModule = await getSheetsWasmModule();
   const bytes = new Uint8Array(buffer);
   const effectiveSkipXmlParsing = shouldSkipXmlParsingForWorkbook(bytes, skipXmlParsing);
-  const nextWorkbook = wasmModule.Workbook.fromBytes(bytes);
+  let activeWorkbook = wasmModule.Workbook.fromBytes(bytes);
   let totalFormulas = 0;
-  for (let index = 0; index < nextWorkbook.sheetCount; index += 1) {
-    totalFormulas += nextWorkbook.getSheet(index).formulaCount;
+  for (let index = 0; index < activeWorkbook.sheetCount; index += 1) {
+    totalFormulas += activeWorkbook.getSheet(index).formulaCount;
   }
   if (totalFormulas <= FORMULA_COUNT_THRESHOLD) {
-    nextWorkbook.calculate();
+    const result = safeCalculate(activeWorkbook, {
+      reparse: () => wasmModule.Workbook.fromBytes(bytes)
+    });
+    activeWorkbook = result.workbook;
   }
 
+  const nextWorkbook = activeWorkbook;
   const visibleSheetIndexByWorkbookSheetIndex = buildVisibleSheetIndexByWorkbookSheetIndex(nextWorkbook, showHiddenSheets);
   const chartStyleAssets = effectiveSkipXmlParsing ? null : parseWorkbookChartStyleAssets(bytes);
   const chartAssets = loadWorkbookChartAssets(

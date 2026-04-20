@@ -24,6 +24,7 @@ import {
   type WorkbookImageSheetOrigin,
   type WorkbookTableMetadata
 } from "./images";
+import { safeCalculate, tryRecalculate } from "./safe-calculate";
 import { getSheetsWasmModule } from "./wasm";
 import { XlsxWorkerClient } from "./worker-client";
 import type {
@@ -1142,21 +1143,25 @@ async function parseWorkbookBuffer(buffer: ArrayBuffer): Promise<{
   workbook: Workbook;
 }> {
   const wasmModule = await getSheetsWasmModule();
-  const workbook = wasmModule.Workbook.fromBytes(new Uint8Array(buffer));
+  const initialWorkbook = wasmModule.Workbook.fromBytes(new Uint8Array(buffer));
   let totalFormulas = 0;
 
-  for (let index = 0; index < workbook.sheetCount; index += 1) {
-    totalFormulas += workbook.getSheet(index).formulaCount;
+  for (let index = 0; index < initialWorkbook.sheetCount; index += 1) {
+    totalFormulas += initialWorkbook.getSheet(index).formulaCount;
   }
 
   const shouldAutoCalculate = totalFormulas <= FORMULA_COUNT_THRESHOLD;
-  if (shouldAutoCalculate) {
-    workbook.calculate();
+  if (!shouldAutoCalculate) {
+    return { shouldAutoCalculate, workbook: initialWorkbook };
   }
 
+  const result = safeCalculate(initialWorkbook, {
+    reparse: () => wasmModule.Workbook.fromBytes(new Uint8Array(buffer))
+  });
+
   return {
-    shouldAutoCalculate,
-    workbook
+    shouldAutoCalculate: result.calculated,
+    workbook: result.workbook
   };
 }
 
@@ -2615,7 +2620,10 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       return;
     }
 
-    targetWorkbook.calculate();
+    const result = tryRecalculate(targetWorkbook);
+    if (!result.calculated) {
+      setShouldAutoCalculate(false);
+    }
   }, [shouldAutoCalculate]);
 
   const getActiveWorksheet = React.useCallback(() => {
@@ -3400,8 +3408,15 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       return;
     }
 
-    workbook.calculate();
-    refreshWorkbookState(workbook);
+    const result = tryRecalculate(workbook);
+    if (result.calculated) {
+      refreshWorkbookState(workbook);
+      return;
+    }
+
+    // Trap poisons the Workbook pointer; skip refreshWorkbookState so we
+    // don't crash reading cells from it.
+    setShouldAutoCalculate(false);
   }, [refreshWorkbookState, workbook]);
 
   const resizeColumn = React.useCallback((col: number, widthPx: number) => {
