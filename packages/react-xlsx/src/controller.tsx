@@ -490,6 +490,33 @@ function resolveDisplayFileName(src?: string, fileName?: string): string {
   }
 }
 
+function resolveSheetDisplayUsedRange(
+  usedRange: [number, number, number, number],
+  sheetState?: {
+    maxContentCol?: number;
+    maxContentRow?: number;
+    maxHorizontalMergeEndCol?: number;
+    maxVerticalMergeEndRow?: number;
+    minContentCol?: number;
+    minContentRow?: number;
+  } | null
+): [number, number, number, number] {
+  const [minRow, minCol, maxRow, maxCol] = usedRange;
+  const maxMeaningfulRow = Math.max(sheetState?.maxContentRow ?? -1, sheetState?.maxVerticalMergeEndRow ?? -1);
+  const maxMeaningfulCol = Math.max(sheetState?.maxContentCol ?? -1, sheetState?.maxHorizontalMergeEndCol ?? -1);
+
+  if (maxMeaningfulRow < 0 && maxMeaningfulCol < 0) {
+    return usedRange;
+  }
+
+  return [
+    sheetState?.minContentRow !== undefined && sheetState.minContentRow >= 0 ? Math.min(minRow, sheetState.minContentRow) : minRow,
+    sheetState?.minContentCol !== undefined && sheetState.minContentCol >= 0 ? Math.min(minCol, sheetState.minContentCol) : minCol,
+    maxMeaningfulRow >= 0 ? Math.min(maxRow, maxMeaningfulRow) : maxRow,
+    maxMeaningfulCol >= 0 ? Math.min(maxCol, maxMeaningfulCol) : maxCol
+  ];
+}
+
 function buildSheetList(
   workbook: Workbook,
   sheetStatesByWorkbookSheetIndex?: Array<{
@@ -504,6 +531,10 @@ function buildSheetList(
     hasVerticalMerges?: boolean;
     maxHorizontalMergeEndCol?: number;
     maxVerticalMergeEndRow?: number;
+    maxContentCol?: number;
+    maxContentRow?: number;
+    minContentCol?: number;
+    minContentRow?: number;
     hiddenCols?: number[];
     hiddenRows?: number[];
     rowHeightOverridesPx?: Record<number, number>;
@@ -589,7 +620,7 @@ function buildSheetList(
       continue;
     }
 
-    const [minRow, minCol, maxRow, maxCol] = usedRange;
+    const [minRow, minCol, maxRow, maxCol] = resolveSheetDisplayUsedRange(usedRange, sheetState);
     let visibleRowsCache: number[] | null = null;
     let visibleColsCache: number[] | null = null;
     let rowHeightsCache: number[] | null = null;

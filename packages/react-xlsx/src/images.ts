@@ -128,6 +128,10 @@ type WorkbookSheetState = {
   hasVerticalMerges: boolean;
   maxHorizontalMergeEndCol: number;
   maxVerticalMergeEndRow: number;
+  maxContentCol: number;
+  maxContentRow: number;
+  minContentCol: number;
+  minContentRow: number;
   hiddenCols: number[];
   hiddenRows: number[];
   rowHeightOverridesPx: Record<number, number>;
@@ -1587,6 +1591,10 @@ function parseSheetState(
   let hasVerticalMerges = false;
   let maxHorizontalMergeEndCol = -1;
   let maxVerticalMergeEndRow = -1;
+  let minContentCol = Number.POSITIVE_INFINITY;
+  let minContentRow = Number.POSITIVE_INFINITY;
+  let maxContentCol = -1;
+  let maxContentRow = -1;
   const columnWidthCharacterWidthPx = measureColumnCharacterWidthPx(
     options?.defaultFont?.family,
     options?.defaultFont?.sizePt
@@ -1606,6 +1614,29 @@ function parseSheetState(
   const zoomScale = Number.isFinite(rawZoomScale) && rawZoomScale > 0
     ? rawZoomScale
     : 100;
+  const trackContentCell = (cellRef: string | null) => {
+    if (!cellRef) {
+      return;
+    }
+
+    const cell = parseA1CellReference(cellRef);
+    if (!cell) {
+      return;
+    }
+
+    minContentCol = Math.min(minContentCol, cell.col);
+    minContentRow = Math.min(minContentRow, cell.row);
+    maxContentCol = Math.max(maxContentCol, cell.col);
+    maxContentRow = Math.max(maxContentRow, cell.row);
+  };
+  const isMeaningfulCellNode = (cellNode: Element) => {
+    if (getFirstChild(cellNode, "f") || getFirstChild(cellNode, "is")) {
+      return true;
+    }
+
+    const valueNode = getFirstChild(cellNode, "v");
+    return Boolean(valueNode && (valueNode.textContent ?? "").length > 0);
+  };
 
   getLocalElements(document, "row").forEach((rowNode) => {
     const rowIndex = Number(rowNode.getAttribute("r") ?? 0) - 1;
@@ -1622,44 +1653,20 @@ function parseSheetState(
       hiddenRows.add(rowIndex);
     }
 
-    if (includeCachedFormulaValues) {
-      getChildElements(rowNode, "c").forEach((cellNode) => {
+    getChildElements(rowNode, "c").forEach((cellNode) => {
+      const cellRef = cellNode.getAttribute("r");
+      if (isMeaningfulCellNode(cellNode)) {
+        trackContentCell(cellRef);
+      }
+
+      if (includeCachedFormulaValues) {
         const formulaNode = getFirstChild(cellNode, "f");
         const valueNode = getFirstChild(cellNode, "v");
-        const cellRef = cellNode.getAttribute("r");
         if (formulaNode && valueNode && cellRef) {
           cachedFormulaValues[cellRef] = valueNode.textContent ?? "";
         }
-      });
-    }
-  });
-
-  getLocalElements(document, "col").forEach((colNode) => {
-    const min = Number(colNode.getAttribute("min") ?? 0) - 1;
-    const max = Number(colNode.getAttribute("max") ?? 0) - 1;
-    const width = Number(colNode.getAttribute("width") ?? Number.NaN);
-    const styleId = Number(colNode.getAttribute("style") ?? Number.NaN);
-    const isHidden = (colNode.getAttribute("hidden") ?? "0") === "1";
-    if (!Number.isFinite(width)) {
-      if (!Number.isFinite(styleId)) {
-        return;
       }
-    }
-
-    for (let col = min; col <= max; col += 1) {
-      if (col >= 0) {
-        if (Number.isFinite(width)) {
-          const widthPx = sheetColumnWidthToPixels(width, columnWidthCharacterWidthPx);
-          colWidthOverridesPx[col] = widthPx;
-        }
-        if (Number.isFinite(styleId)) {
-          colStyleIds[col] = styleId;
-        }
-        if (isHidden) {
-          hiddenCols.add(col);
-        }
-      }
-    }
+    });
   });
 
   getLocalElements(document, "mergeCell").forEach((mergeNode) => {
@@ -1679,6 +1686,35 @@ function parseSheetState(
     }
   });
 
+  const maxMetadataCol = Math.max(maxContentCol, maxHorizontalMergeEndCol, 0) + 256;
+  getLocalElements(document, "col").forEach((colNode) => {
+    const min = Number(colNode.getAttribute("min") ?? 0) - 1;
+    const max = Number(colNode.getAttribute("max") ?? 0) - 1;
+    const width = Number(colNode.getAttribute("width") ?? Number.NaN);
+    const styleId = Number(colNode.getAttribute("style") ?? Number.NaN);
+    const isHidden = (colNode.getAttribute("hidden") ?? "0") === "1";
+    if (!Number.isFinite(width)) {
+      if (!Number.isFinite(styleId)) {
+        return;
+      }
+    }
+
+    for (let col = min; col <= Math.min(max, maxMetadataCol); col += 1) {
+      if (col >= 0) {
+        if (Number.isFinite(width)) {
+          const widthPx = sheetColumnWidthToPixels(width, columnWidthCharacterWidthPx);
+          colWidthOverridesPx[col] = widthPx;
+        }
+        if (Number.isFinite(styleId)) {
+          colStyleIds[col] = styleId;
+        }
+        if (isHidden) {
+          hiddenCols.add(col);
+        }
+      }
+    }
+  });
+
   return {
     cachedFormulaValues,
     columnWidthCharacterWidthPx,
@@ -1691,6 +1727,10 @@ function parseSheetState(
     hasVerticalMerges,
     maxHorizontalMergeEndCol,
     maxVerticalMergeEndRow,
+    maxContentCol,
+    maxContentRow,
+    minContentCol: Number.isFinite(minContentCol) ? minContentCol : -1,
+    minContentRow: Number.isFinite(minContentRow) ? minContentRow : -1,
     hiddenCols: [...hiddenCols].sort((left, right) => left - right),
     hiddenRows: [...hiddenRows].sort((left, right) => left - right),
     rowHeightOverridesPx,

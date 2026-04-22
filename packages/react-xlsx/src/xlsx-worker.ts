@@ -244,6 +244,26 @@ function resolveWorksheetZoomScale(
   return value ?? DEFAULT_ZOOM_SCALE;
 }
 
+function resolveSheetDisplayUsedRange(
+  usedRange: [number, number, number, number],
+  sheetState?: WorkbookStructureAssets["sheetStatesByWorkbookSheetIndex"][number] | null
+): [number, number, number, number] {
+  const [minRow, minCol, maxRow, maxCol] = usedRange;
+  const maxMeaningfulRow = Math.max(sheetState?.maxContentRow ?? -1, sheetState?.maxVerticalMergeEndRow ?? -1);
+  const maxMeaningfulCol = Math.max(sheetState?.maxContentCol ?? -1, sheetState?.maxHorizontalMergeEndCol ?? -1);
+
+  if (maxMeaningfulRow < 0 && maxMeaningfulCol < 0) {
+    return usedRange;
+  }
+
+  return [
+    sheetState?.minContentRow !== undefined && sheetState.minContentRow >= 0 ? Math.min(minRow, sheetState.minContentRow) : minRow,
+    sheetState?.minContentCol !== undefined && sheetState.minContentCol >= 0 ? Math.min(minCol, sheetState.minContentCol) : minCol,
+    maxMeaningfulRow >= 0 ? Math.min(maxRow, maxMeaningfulRow) : maxRow,
+    maxMeaningfulCol >= 0 ? Math.min(maxCol, maxMeaningfulCol) : maxCol
+  ];
+}
+
 function buildSheetList(
   nextWorkbook: Workbook,
   structureAssets?: WorkbookStructureAssets | null,
@@ -321,7 +341,7 @@ function buildSheetList(
       continue;
     }
 
-    const [minRow, minCol, maxRow, maxCol] = usedRange;
+    const [minRow, minCol, maxRow, maxCol] = resolveSheetDisplayUsedRange(usedRange, sheetState);
     const hiddenRows = (sheetState?.hiddenRows ?? []).filter((row) => row >= 0 && row <= maxRow);
     const hiddenCols = (sheetState?.hiddenCols ?? []).filter((col) => col >= 0 && col <= maxCol);
 

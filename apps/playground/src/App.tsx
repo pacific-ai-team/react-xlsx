@@ -536,7 +536,7 @@ export function App() {
   const [isDragActive, setIsDragActive] = React.useState(false);
   const [isDocumentDark, setIsDocumentDark] = React.useState(false);
   const [experimentalCanvas, setExperimentalCanvas] = React.useState(true);
-  const [isReadOnly, setIsReadOnly] = React.useState(false);
+  const [isReadOnly, setIsReadOnly] = React.useState(true);
   const dragDepthRef = React.useRef(0);
 
   const controller = useXlsxViewerController(

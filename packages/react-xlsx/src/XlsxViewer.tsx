@@ -68,6 +68,8 @@ const IMAGE_MIN_SIZE_PX = 16;
 const IMAGE_HANDLE_SIZE_PX = 10;
 const CANVAS_RESIZE_HIT_SLOP_PX = 8;
 const CANVAS_VIEWPORT_OVERSCAN_PX = 240;
+const CANVAS_SCROLL_BUFFER_PX = 240;
+const CANVAS_IMMEDIATE_VIEWPORT_SYNC_THRESHOLD_PX = CANVAS_SCROLL_BUFFER_PX * 1.5;
 const THUMBNAIL_DEFAULT_MAX_DIMENSION = 192;
 const THUMBNAIL_FALLBACK_ROWS = 12;
 const THUMBNAIL_FALLBACK_COLS = 8;
@@ -5916,6 +5918,10 @@ function XlsxGrid({
   const leftFrozenHeaderCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const leftScrollHeaderCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const cornerHeaderCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const canvasScrollOverlayContentRef = React.useRef<HTMLDivElement>(null);
+  const canvasTopOverlayContentRef = React.useRef<HTMLDivElement>(null);
+  const canvasLeftOverlayContentRef = React.useRef<HTMLDivElement>(null);
+  const canvasCornerOverlayContentRef = React.useRef<HTMLDivElement>(null);
   const selectionOverlayRef = React.useRef<HTMLDivElement>(null);
   const activeValidationOverlayRef = React.useRef<HTMLDivElement>(null);
   const fillHandleRef = React.useRef<HTMLDivElement>(null);
@@ -6058,6 +6064,12 @@ function XlsxGrid({
     top: 0,
     width: 0
   });
+  const canvasLayoutMetricsRef = React.useRef({
+    displayHeaderHeight: HEADER_HEIGHT,
+    displayRowHeaderWidth: ROW_HEADER_WIDTH,
+    frozenPaneBottom: HEADER_HEIGHT,
+    frozenPaneRight: ROW_HEADER_WIDTH
+  });
   const paintedDrawingViewportRef = React.useRef<DrawingViewport>({
     height: 0,
     left: 0,
@@ -6189,6 +6201,12 @@ function XlsxGrid({
   const applyCanvasViewportCompensation = React.useCallback((liveViewport?: DrawingViewport) => {
     const nextLiveViewport = liveViewport ?? liveDrawingViewportRef.current;
     const paintedViewport = paintedDrawingViewportRef.current;
+    const {
+      displayHeaderHeight: liveDisplayHeaderHeight,
+      displayRowHeaderWidth: liveDisplayRowHeaderWidth,
+      frozenPaneBottom: liveFrozenPaneBottom,
+      frozenPaneRight: liveFrozenPaneRight
+    } = canvasLayoutMetricsRef.current;
     const currentLiveGestureZoom = liveGestureZoomRef.current;
     const isLiveZooming = currentLiveGestureZoom !== null && zoomScale === currentLiveGestureZoom.baseZoomScale;
     const liveZoomScale = isLiveZooming
@@ -6219,6 +6237,20 @@ function XlsxGrid({
         translateX !== 0 || translateY !== 0 || liveZoomScale !== 1
           ? "transform"
           : "";
+    };
+    const applyOverlayTransform = (
+      element: HTMLDivElement | null,
+      translateX: number,
+      translateY: number
+    ) => {
+      if (!element) {
+        return;
+      }
+      element.style.transform = liveZoomScale !== 1
+        ? `translate3d(${translateX + liveZoomTranslateX}px, ${translateY + liveZoomTranslateY}px, 0) scale(${liveZoomScale})`
+        : `translate3d(${translateX}px, ${translateY}px, 0)`;
+      element.style.transformOrigin = "0 0";
+      element.style.willChange = "transform";
     };
 
     applyCanvasTransform(
@@ -6266,6 +6298,26 @@ function XlsxGrid({
       cornerHeaderCanvasRef.current,
       liveZoomTranslateX,
       liveZoomTranslateY
+    );
+    applyOverlayTransform(
+      canvasScrollOverlayContentRef.current,
+      -nextLiveViewport.left - liveFrozenPaneRight,
+      -nextLiveViewport.top - liveFrozenPaneBottom
+    );
+    applyOverlayTransform(
+      canvasTopOverlayContentRef.current,
+      -nextLiveViewport.left - liveFrozenPaneRight,
+      -liveDisplayHeaderHeight
+    );
+    applyOverlayTransform(
+      canvasLeftOverlayContentRef.current,
+      -liveDisplayRowHeaderWidth,
+      -nextLiveViewport.top - liveFrozenPaneBottom
+    );
+    applyOverlayTransform(
+      canvasCornerOverlayContentRef.current,
+      -liveDisplayRowHeaderWidth,
+      -liveDisplayHeaderHeight
     );
   }, [zoomScale]);
   const updateLiveGestureZoomState = React.useCallback((
@@ -6721,6 +6773,12 @@ function XlsxGrid({
     ),
     [displayActualColWidths, displayDefaultColWidth, displayRowHeaderWidth, frozenCols, stickyLeftByCol]
   );
+  canvasLayoutMetricsRef.current = {
+    displayHeaderHeight,
+    displayRowHeaderWidth,
+    frozenPaneBottom,
+    frozenPaneRight
+  };
   const rowPrefixSumsRef = React.useRef<number[]>(rowPrefixSums);
   const colPrefixSumsRef = React.useRef<number[]>(colPrefixSums);
   const firstVisibleRow = visibleRows[0];
@@ -7258,21 +7316,31 @@ function XlsxGrid({
   const handleScrollerScroll = React.useCallback((event: React.UIEvent<HTMLDivElement>) => {
     const currentScroller = event.currentTarget;
     cachedScrollerRectRef.current = null;
-    syncDrawingViewport(currentScroller, { immediate: true });
+    const paintedViewport = paintedDrawingViewportRef.current;
+    const shouldSyncDrawingViewportImmediately =
+      Math.abs(currentScroller.scrollLeft - paintedViewport.left) > CANVAS_IMMEDIATE_VIEWPORT_SYNC_THRESHOLD_PX
+      || Math.abs(currentScroller.scrollTop - paintedViewport.top) > CANVAS_IMMEDIATE_VIEWPORT_SYNC_THRESHOLD_PX;
+    syncDrawingViewport(currentScroller, { immediate: shouldSyncDrawingViewportImmediately });
     if (
       currentScroller.scrollHeight - (currentScroller.scrollTop + currentScroller.clientHeight) <
       OPEN_GRID_VERTICAL_EDGE_PX
     ) {
-      setDisplayRowLimit((current) => current + OPEN_GRID_ROW_GROWTH);
+      setDisplayRowLimit((current) => {
+        const nextLimit = current + OPEN_GRID_ROW_GROWTH;
+        return readOnly && current < maxRowDisplayLimit ? Math.min(maxRowDisplayLimit, nextLimit) : nextLimit;
+      });
     }
 
     if (
       currentScroller.scrollWidth - (currentScroller.scrollLeft + currentScroller.clientWidth) <
       OPEN_GRID_HORIZONTAL_EDGE_PX
     ) {
-      setDisplayColLimit((current) => current + OPEN_GRID_COL_GROWTH);
+      setDisplayColLimit((current) => {
+        const nextLimit = current + OPEN_GRID_COL_GROWTH;
+        return readOnly && current < maxColDisplayLimit ? Math.min(maxColDisplayLimit, nextLimit) : nextLimit;
+      });
     }
-  }, [syncDrawingViewport]);
+  }, [maxColDisplayLimit, maxRowDisplayLimit, readOnly, syncDrawingViewport]);
 
   React.useEffect(() => {
     const scroller = scrollRef.current;
@@ -9628,6 +9696,24 @@ function XlsxGrid({
     rowPrefixSums,
     stickyTopByRow
   ]);
+  const scrollBodyViewportWidth = Math.max(0, drawingViewport.width - frozenPaneRight);
+  const scrollBodyViewportHeight = Math.max(0, drawingViewport.height - frozenPaneBottom);
+  const canvasScrollBufferX = Math.min(CANVAS_SCROLL_BUFFER_PX, scrollBodyViewportWidth);
+  const canvasScrollBufferY = Math.min(CANVAS_SCROLL_BUFFER_PX, scrollBodyViewportHeight);
+  const scrollBodyCanvasLeft = frozenPaneRight - canvasScrollBufferX;
+  const scrollBodyCanvasTop = frozenPaneBottom - canvasScrollBufferY;
+  const scrollBodyCanvasWidth = scrollBodyViewportWidth + canvasScrollBufferX * 2;
+  const scrollBodyCanvasHeight = scrollBodyViewportHeight + canvasScrollBufferY * 2;
+  const topBodyCanvasWidth = scrollBodyCanvasWidth;
+  const topBodyCanvasHeight = Math.max(0, frozenPaneBottom - displayHeaderHeight);
+  const leftBodyCanvasWidth = Math.max(0, frozenPaneRight - displayRowHeaderWidth);
+  const leftBodyCanvasHeight = scrollBodyCanvasHeight;
+  const cornerBodyCanvasWidth = leftBodyCanvasWidth;
+  const cornerBodyCanvasHeight = topBodyCanvasHeight;
+  const topFrozenHeaderCanvasWidth = leftBodyCanvasWidth;
+  const topScrollHeaderCanvasWidth = scrollBodyViewportWidth;
+  const leftFrozenHeaderCanvasHeight = topBodyCanvasHeight;
+  const leftScrollHeaderCanvasHeight = scrollBodyViewportHeight;
   const canvasColumnHeaderCells = React.useMemo(
     () =>
       canvasVisibleColItems.flatMap<CanvasStickyColumnHeaderCell>((column) => {
@@ -10123,18 +10209,6 @@ function XlsxGrid({
     if (!shouldRepaintBody && !shouldRepaintHeaders) {
       return;
     }
-    const scrollBodyCanvasWidth = Math.max(0, drawingViewport.width - frozenPaneRight);
-    const scrollBodyCanvasHeight = Math.max(0, drawingViewport.height - frozenPaneBottom);
-    const topBodyCanvasWidth = scrollBodyCanvasWidth;
-    const topBodyCanvasHeight = Math.max(0, frozenPaneBottom - displayHeaderHeight);
-    const leftBodyCanvasWidth = Math.max(0, frozenPaneRight - displayRowHeaderWidth);
-    const leftBodyCanvasHeight = scrollBodyCanvasHeight;
-    const cornerBodyCanvasWidth = leftBodyCanvasWidth;
-    const cornerBodyCanvasHeight = topBodyCanvasHeight;
-    const topFrozenHeaderCanvasWidth = leftBodyCanvasWidth;
-    const topScrollHeaderCanvasWidth = scrollBodyCanvasWidth;
-    const leftFrozenHeaderCanvasHeight = topBodyCanvasHeight;
-    const leftScrollHeaderCanvasHeight = scrollBodyCanvasHeight;
     const paneBounds: Record<FrozenDrawingPane, { height: number; left: number; top: number; width: number }> = {
       corner: {
         height: cornerBodyCanvasHeight,
@@ -10145,18 +10219,18 @@ function XlsxGrid({
       left: {
         height: leftBodyCanvasHeight,
         left: displayRowHeaderWidth,
-        top: frozenPaneBottom,
+        top: scrollBodyCanvasTop,
         width: leftBodyCanvasWidth
       },
       scroll: {
         height: scrollBodyCanvasHeight,
-        left: frozenPaneRight,
-        top: frozenPaneBottom,
+        left: scrollBodyCanvasLeft,
+        top: scrollBodyCanvasTop,
         width: scrollBodyCanvasWidth
       },
       top: {
         height: topBodyCanvasHeight,
-        left: frozenPaneRight,
+        left: scrollBodyCanvasLeft,
         top: displayHeaderHeight,
         width: topBodyCanvasWidth
       }
@@ -11357,18 +11431,6 @@ function XlsxGrid({
     width: 0,
     zIndex: canvasHeaderOverlayZIndex
   };
-  const scrollBodyCanvasWidth = Math.max(0, drawingViewport.width - frozenPaneRight);
-  const scrollBodyCanvasHeight = Math.max(0, drawingViewport.height - frozenPaneBottom);
-  const topBodyCanvasWidth = scrollBodyCanvasWidth;
-  const topBodyCanvasHeight = Math.max(0, frozenPaneBottom - displayHeaderHeight);
-  const leftBodyCanvasWidth = Math.max(0, frozenPaneRight - displayRowHeaderWidth);
-  const leftBodyCanvasHeight = scrollBodyCanvasHeight;
-  const cornerBodyCanvasWidth = leftBodyCanvasWidth;
-  const cornerBodyCanvasHeight = topBodyCanvasHeight;
-  const topFrozenHeaderCanvasWidth = leftBodyCanvasWidth;
-  const topScrollHeaderCanvasWidth = scrollBodyCanvasWidth;
-  const leftFrozenHeaderCanvasHeight = topBodyCanvasHeight;
-  const leftScrollHeaderCanvasHeight = scrollBodyCanvasHeight;
   const canvasBodyBaseStyle: React.CSSProperties = {
     cursor: "cell",
     pointerEvents: "auto",
@@ -11380,13 +11442,13 @@ function XlsxGrid({
   const canvasScrollBodyStyle: React.CSSProperties = {
     ...canvasBodyBaseStyle,
     display: scrollBodyCanvasWidth > 0 && scrollBodyCanvasHeight > 0 ? "block" : "none",
-    left: frozenPaneRight,
-    top: frozenPaneBottom
+    left: scrollBodyCanvasLeft,
+    top: scrollBodyCanvasTop
   };
   const canvasTopBodyStyle: React.CSSProperties = {
     ...canvasBodyBaseStyle,
     display: topBodyCanvasWidth > 0 && topBodyCanvasHeight > 0 ? "block" : "none",
-    left: frozenPaneRight,
+    left: scrollBodyCanvasLeft,
     top: displayHeaderHeight,
     zIndex: 30
   };
@@ -11394,7 +11456,7 @@ function XlsxGrid({
     ...canvasBodyBaseStyle,
     display: leftBodyCanvasWidth > 0 && leftBodyCanvasHeight > 0 ? "block" : "none",
     left: displayRowHeaderWidth,
-    top: frozenPaneBottom,
+    top: scrollBodyCanvasTop,
     zIndex: 30
   };
   const canvasCornerBodyStyle: React.CSSProperties = {
@@ -12028,26 +12090,26 @@ function XlsxGrid({
   };
   const canvasScrollOverlayPaneStyle: React.CSSProperties = {
     ...canvasOverlayPaneBaseStyle,
-    display: scrollBodyCanvasWidth > 0 && scrollBodyCanvasHeight > 0 ? "block" : "none",
-    height: scrollBodyCanvasHeight,
+    display: scrollBodyViewportWidth > 0 && scrollBodyViewportHeight > 0 ? "block" : "none",
+    height: scrollBodyViewportHeight,
     left: frozenPaneRight,
     top: frozenPaneBottom,
-    width: scrollBodyCanvasWidth,
+    width: scrollBodyViewportWidth,
     zIndex: 20
   };
   const canvasTopOverlayPaneStyle: React.CSSProperties = {
     ...canvasOverlayPaneBaseStyle,
-    display: topBodyCanvasWidth > 0 && topBodyCanvasHeight > 0 ? "block" : "none",
+    display: scrollBodyViewportWidth > 0 && topBodyCanvasHeight > 0 ? "block" : "none",
     height: topBodyCanvasHeight,
     left: frozenPaneRight,
     top: displayHeaderHeight,
-    width: topBodyCanvasWidth,
+    width: scrollBodyViewportWidth,
     zIndex: 35
   };
   const canvasLeftOverlayPaneStyle: React.CSSProperties = {
     ...canvasOverlayPaneBaseStyle,
-    display: leftBodyCanvasWidth > 0 && leftBodyCanvasHeight > 0 ? "block" : "none",
-    height: leftBodyCanvasHeight,
+    display: leftBodyCanvasWidth > 0 && scrollBodyViewportHeight > 0 ? "block" : "none",
+    height: scrollBodyViewportHeight,
     left: displayRowHeaderWidth,
     top: frozenPaneBottom,
     width: leftBodyCanvasWidth,
@@ -12716,6 +12778,7 @@ function XlsxGrid({
                     <>
                       <div style={canvasScrollOverlayPaneStyle}>
                         <div
+                          ref={canvasScrollOverlayContentRef}
                           style={{
                             height: sheetContentHeight,
                             left: 0,
@@ -12723,6 +12786,7 @@ function XlsxGrid({
                             position: "absolute",
                             top: 0,
                             transform: `translate(${-drawingViewport.left - frozenPaneRight}px, ${-drawingViewport.top - frozenPaneBottom}px)`,
+                            transformOrigin: "0 0",
                             width: totalWidth
                           }}
                         >
@@ -12731,6 +12795,7 @@ function XlsxGrid({
                       </div>
                       <div style={canvasTopOverlayPaneStyle}>
                         <div
+                          ref={canvasTopOverlayContentRef}
                           style={{
                             height: sheetContentHeight,
                             left: 0,
@@ -12738,6 +12803,7 @@ function XlsxGrid({
                             position: "absolute",
                             top: 0,
                             transform: `translate(${-drawingViewport.left - frozenPaneRight}px, ${-displayHeaderHeight}px)`,
+                            transformOrigin: "0 0",
                             width: totalWidth
                           }}
                         >
@@ -12746,6 +12812,7 @@ function XlsxGrid({
                       </div>
                       <div style={canvasLeftOverlayPaneStyle}>
                         <div
+                          ref={canvasLeftOverlayContentRef}
                           style={{
                             height: sheetContentHeight,
                             left: 0,
@@ -12753,6 +12820,7 @@ function XlsxGrid({
                             position: "absolute",
                             top: 0,
                             transform: `translate(${-displayRowHeaderWidth}px, ${-drawingViewport.top - frozenPaneBottom}px)`,
+                            transformOrigin: "0 0",
                             width: totalWidth
                           }}
                         >
@@ -12761,6 +12829,7 @@ function XlsxGrid({
                       </div>
                       <div style={canvasCornerOverlayPaneStyle}>
                         <div
+                          ref={canvasCornerOverlayContentRef}
                           style={{
                             height: sheetContentHeight,
                             left: 0,
@@ -12768,6 +12837,7 @@ function XlsxGrid({
                             position: "absolute",
                             top: 0,
                             transform: `translate(${-displayRowHeaderWidth}px, ${-displayHeaderHeight}px)`,
+                            transformOrigin: "0 0",
                             width: totalWidth
                           }}
                         >
