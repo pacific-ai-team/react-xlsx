@@ -1,6 +1,7 @@
 import * as React from "react";
 import type { Workbook, Worksheet } from "@dukelib/sheets-wasm";
 import {
+  type VirtualItem,
   useVirtualizer
 } from "@tanstack/react-virtual";
 import { resolveWorkbookColor, resolveWorkbookFillStyle } from "./colors";
@@ -67,9 +68,11 @@ const SELECTION_DRAG_THRESHOLD_PX = 4;
 const IMAGE_MIN_SIZE_PX = 16;
 const IMAGE_HANDLE_SIZE_PX = 10;
 const CANVAS_RESIZE_HIT_SLOP_PX = 8;
-const CANVAS_VIEWPORT_OVERSCAN_PX = 240;
-const CANVAS_SCROLL_BUFFER_PX = 240;
+const CANVAS_VIEWPORT_OVERSCAN_PX = 480;
+const CANVAS_SCROLL_BUFFER_PX = 480;
+const CANVAS_DEFERRED_VIEWPORT_SYNC_THRESHOLD_PX = CANVAS_SCROLL_BUFFER_PX - 96;
 const CANVAS_IMMEDIATE_VIEWPORT_SYNC_THRESHOLD_PX = CANVAS_SCROLL_BUFFER_PX * 1.5;
+const CANVAS_DIRTY_CELL_CULL_MARGIN_PX = CANVAS_VIEWPORT_OVERSCAN_PX * 2;
 const THUMBNAIL_DEFAULT_MAX_DIMENSION = 192;
 const THUMBNAIL_FALLBACK_ROWS = 12;
 const THUMBNAIL_FALLBACK_COLS = 8;
@@ -85,6 +88,12 @@ const SHEET_SURFACE = "#ffffff";
 const SHEET_GRIDLINE = "#d9d9d9";
 const DEFAULT_CELL_PADDING = "0 4px";
 const IMAGE_HANDLE_POSITIONS: XlsxImageResizeHandlePosition[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+const CANVAS_CELL_STYLE_CACHE_LIMIT = 4096;
+const CANVAS_TEXT_MEASURE_CACHE_LIMIT = 20000;
+const CANVAS_TEXT_TRUNCATE_CACHE_LIMIT = 4096;
+const CANVAS_TEXT_WRAP_CACHE_LIMIT = 2048;
+const CANVAS_PATH2D_CACHE_LIMIT = 512;
+const EMPTY_VIRTUAL_ITEMS: VirtualItem[] = [];
 
 const IMAGE_HANDLE_CURSOR: Record<XlsxImageResizeHandlePosition, React.CSSProperties["cursor"]> = {
   e: "ew-resize",
@@ -130,6 +139,59 @@ const NUMERIC_LENGTH_STYLE_KEYS = new Set([
   "top",
   "width"
 ]);
+
+const canvasCellStyleCache = new Map<string, CanvasCellStyleCache>();
+const canvasTextMeasureCache = new Map<string, number>();
+const canvasTextTruncateCache = new Map<string, string>();
+const canvasTextWrapCache = new Map<string, string[]>();
+const canvasPath2DCache = new Map<string, Path2D>();
+
+function rememberBoundedCacheValue<K, V>(cache: Map<K, V>, key: K, value: V, limit: number) {
+  if (cache.size >= limit) {
+    const oldestKey = cache.keys().next().value as K | undefined;
+    if (oldestKey !== undefined) {
+      cache.delete(oldestKey);
+    }
+  }
+  cache.set(key, value);
+  return value;
+}
+
+function roundCanvasCacheWidth(width: number) {
+  return Math.round(width * 4) / 4;
+}
+
+function measureCanvasTextWidth(context: CanvasRenderingContext2D, text: string) {
+  if (text.length === 0) {
+    return 0;
+  }
+
+  const cacheKey = `${context.font}\u0000${text}`;
+  const cached = canvasTextMeasureCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  return rememberBoundedCacheValue(
+    canvasTextMeasureCache,
+    cacheKey,
+    context.measureText(text).width,
+    CANVAS_TEXT_MEASURE_CACHE_LIMIT
+  );
+}
+
+function getCachedCanvasPath2D(path: string) {
+  if (typeof Path2D === "undefined") {
+    return null;
+  }
+
+  const cached = canvasPath2DCache.get(path);
+  if (cached) {
+    return cached;
+  }
+
+  return rememberBoundedCacheValue(canvasPath2DCache, path, new Path2D(path), CANVAS_PATH2D_CACHE_LIMIT);
+}
 
 function scaleCssLengthExpression(value: string, scale: number) {
   if (scale === 1) {
@@ -383,7 +445,6 @@ function strokeCanvasBorderSide(
   const top = rect.top;
   const bottom = rect.top + rect.height;
 
-  context.save();
   context.strokeStyle = border.color;
   context.lineWidth = border.width;
   applyCanvasBorderDash(context, border.style, border.width);
@@ -416,7 +477,9 @@ function strokeCanvasBorderSide(
     strokeLine(0);
   }
 
-  context.restore();
+  context.setLineDash([]);
+  context.lineCap = "butt";
+  context.lineWidth = 1;
 }
 
 function truncateCanvasText(
@@ -428,7 +491,15 @@ function truncateCanvasText(
     return "";
   }
 
-  if (context.measureText(text).width <= maxWidth) {
+  const roundedMaxWidth = roundCanvasCacheWidth(maxWidth);
+  const cacheKey = `${context.font}\u0000${roundedMaxWidth}\u0000${text}`;
+  const cached = canvasTextTruncateCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  if (measureCanvasTextWidth(context, text) <= maxWidth) {
+    rememberBoundedCacheValue(canvasTextTruncateCache, cacheKey, text, CANVAS_TEXT_TRUNCATE_CACHE_LIMIT);
     return text;
   }
 
@@ -438,14 +509,19 @@ function truncateCanvasText(
   while (low < high) {
     const mid = Math.ceil((low + high) / 2);
     const candidate = `${text.slice(0, mid)}${ellipsis}`;
-    if (context.measureText(candidate).width <= maxWidth) {
+    if (measureCanvasTextWidth(context, candidate) <= maxWidth) {
       low = mid;
     } else {
       high = mid - 1;
     }
   }
 
-  return low <= 0 ? ellipsis : `${text.slice(0, low)}${ellipsis}`;
+  return rememberBoundedCacheValue(
+    canvasTextTruncateCache,
+    cacheKey,
+    low <= 0 ? ellipsis : `${text.slice(0, low)}${ellipsis}`,
+    CANVAS_TEXT_TRUNCATE_CACHE_LIMIT
+  );
 }
 
 function resolveCanvasFontSizePx(style: React.CSSProperties, fallbackSize = 12) {
@@ -518,7 +594,7 @@ function resolveCanvasWrapIndex(
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
     const candidate = text.slice(0, mid);
-    if (context.measureText(candidate).width <= maxWidth) {
+    if (measureCanvasTextWidth(context, candidate) <= maxWidth) {
       best = mid;
       low = mid + 1;
     } else {
@@ -543,6 +619,13 @@ function wrapCanvasText(
   }
 
   const normalized = text.replace(/\r\n?/g, "\n");
+  const roundedMaxWidth = roundCanvasCacheWidth(maxWidth);
+  const cacheKey = `${context.font}\u0000${roundedMaxWidth}\u0000${normalized}`;
+  const cached = canvasTextWrapCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const paragraphs = normalized.split("\n");
   const lines: string[] = [];
 
@@ -554,7 +637,7 @@ function wrapCanvasText(
 
     let remaining = paragraph;
     while (remaining.length > 0) {
-      if (context.measureText(remaining).width <= maxWidth) {
+      if (measureCanvasTextWidth(context, remaining) <= maxWidth) {
         lines.push(remaining);
         break;
       }
@@ -578,7 +661,7 @@ function wrapCanvasText(
     }
   }
 
-  return lines;
+  return rememberBoundedCacheValue(canvasTextWrapCache, cacheKey, lines, CANVAS_TEXT_WRAP_CACHE_LIMIT);
 }
 
 type CanvasCellStyleCache = {
@@ -596,7 +679,29 @@ type CanvasCellStyleCache = {
 };
 
 function buildCanvasCellStyleCache(style: React.CSSProperties): CanvasCellStyleCache {
-  return {
+  const cacheKey = [
+    style.font,
+    style.fontStyle,
+    style.fontWeight,
+    style.fontSize,
+    style.fontFamily,
+    style.borderTop,
+    style.borderRight,
+    style.borderBottom,
+    style.borderLeft,
+    style.padding,
+    style.textAlign,
+    style.color,
+    style.textDecoration,
+    style.textOverflow,
+    style.whiteSpace
+  ].map((value) => value == null ? "" : String(value)).join("\u0001");
+  const cached = canvasCellStyleCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  return rememberBoundedCacheValue(canvasCellStyleCache, cacheKey, {
     baseFont: resolveCanvasFont(style, 12),
     bottomBorder: parseCanvasBorderDeclaration(style.borderBottom),
     leftBorder: parseCanvasBorderDeclaration(style.borderLeft),
@@ -608,7 +713,7 @@ function buildCanvasCellStyleCache(style: React.CSSProperties): CanvasCellStyleC
     textOverflowEllipsis: style.textOverflow === "ellipsis",
     topBorder: parseCanvasBorderDeclaration(style.borderTop),
     usesWrappedText: style.whiteSpace === "pre-wrap"
-  };
+  }, CANVAS_CELL_STYLE_CACHE_LIMIT);
 }
 
 function splitCssGradientArgs(value: string) {
@@ -3403,13 +3508,13 @@ function measureTextWidth(value: string, style: React.CSSProperties) {
   }
 
   textMeasureCanvas ??= document.createElement("canvas");
-  const context = textMeasureCanvas.getContext("2d");
+  const context = textMeasureCanvas.getContext("2d", { alpha: false });
   if (!context) {
     return value.length * 7;
   }
 
   context.font = buildCanvasFont(style);
-  return context.measureText(value).width;
+  return measureCanvasTextWidth(context, value);
 }
 
 function measureWrappedTextHeight(value: string, style: React.CSSProperties, widthPx: number) {
@@ -3427,7 +3532,7 @@ function measureWrappedTextHeight(value: string, style: React.CSSProperties, wid
   }
 
   textMeasureCanvas ??= document.createElement("canvas");
-  const context = textMeasureCanvas.getContext("2d");
+  const context = textMeasureCanvas.getContext("2d", { alpha: false });
   if (!context) {
     return (fallbackLineCount * lineHeight) + padding.top + padding.bottom;
   }
@@ -4850,7 +4955,7 @@ function blitCanvasWithScrollDelta(
     bufferCanvas.height = deviceHeight;
   }
 
-  const bufferContext = bufferCanvas.getContext("2d");
+  const bufferContext = bufferCanvas.getContext("2d", { alpha: false });
   if (!bufferContext) {
     return null;
   }
@@ -5884,6 +5989,12 @@ function XlsxGrid({
   controller: XlsxViewerController;
   palette: ViewerPalette;
 }) {
+  const xlsxCanvasProfileTarget = typeof window !== "undefined"
+    ? (window as unknown as {
+        __xlsxCanvasProfile?: Array<Record<string, number | boolean>>;
+      }).__xlsxCanvasProfile
+    : undefined;
+  const xlsxGridRenderStart = xlsxCanvasProfileTarget ? performance.now() : 0;
   const {
     activeCell,
     activeSheet,
@@ -6005,6 +6116,11 @@ function XlsxGrid({
   const pendingLiveZoomCommitRef = React.useRef<number | null>(null);
   const touchPinchStateRef = React.useRef<{ startDistance: number; startZoomScale: number } | null>(null);
   const safariPinchStartZoomRef = React.useRef<number | null>(null);
+  const canvasTransformStyleCacheRef = React.useRef(new WeakMap<HTMLElement, {
+    transform: string;
+    transformOrigin: string | null;
+    willChange: string;
+  }>());
   const displayedSelectionRef = React.useRef<XlsxCellRange | null>(null);
   const firstVisibleColRef = React.useRef<number | undefined>(undefined);
   const lastVisibleColRef = React.useRef<number | undefined>(undefined);
@@ -6277,36 +6393,60 @@ function XlsxGrid({
       ? currentLiveGestureZoom.anchor.y * (1 - liveZoomScale)
       : 0;
 
+    const applyElementTransform = (
+      element: HTMLElement | null,
+      transform: string,
+      willChange: string,
+      transformOrigin: string | null = null
+    ) => {
+      if (!element) {
+        return;
+      }
+
+      const cached = canvasTransformStyleCacheRef.current.get(element);
+      if (cached?.transform !== transform || element.style.transform !== transform) {
+        element.style.transform = transform;
+      }
+      if (cached?.willChange !== willChange || element.style.willChange !== willChange) {
+        element.style.willChange = willChange;
+      }
+      if (
+        transformOrigin !== null
+        && (cached?.transformOrigin !== transformOrigin || element.style.transformOrigin !== transformOrigin)
+      ) {
+        element.style.transformOrigin = transformOrigin;
+      }
+      canvasTransformStyleCacheRef.current.set(element, {
+        transform,
+        transformOrigin,
+        willChange
+      });
+    };
     const applyCanvasTransform = (
       canvas: HTMLCanvasElement | null,
       translateX: number,
       translateY: number
     ) => {
-      if (!canvas) {
-        return;
-      }
-      canvas.style.transform =
-        translateX !== 0 || translateY !== 0 || liveZoomScale !== 1
-          ? `translate3d(${translateX}px, ${translateY}px, 0) scale(${liveZoomScale})`
-          : "";
-      canvas.style.willChange =
-        translateX !== 0 || translateY !== 0 || liveZoomScale !== 1
-          ? "transform"
-          : "";
+      const shouldTransform = translateX !== 0 || translateY !== 0 || liveZoomScale !== 1;
+      applyElementTransform(
+        canvas,
+        shouldTransform ? `translate3d(${translateX}px, ${translateY}px, 0) scale(${liveZoomScale})` : "",
+        shouldTransform ? "transform" : ""
+      );
     };
     const applyOverlayTransform = (
       element: HTMLDivElement | null,
       translateX: number,
       translateY: number
     ) => {
-      if (!element) {
-        return;
-      }
-      element.style.transform = liveZoomScale !== 1
-        ? `translate3d(${translateX + liveZoomTranslateX}px, ${translateY + liveZoomTranslateY}px, 0) scale(${liveZoomScale})`
-        : `translate3d(${translateX}px, ${translateY}px, 0)`;
-      element.style.transformOrigin = "0 0";
-      element.style.willChange = "transform";
+      applyElementTransform(
+        element,
+        liveZoomScale !== 1
+          ? `translate3d(${translateX + liveZoomTranslateX}px, ${translateY + liveZoomTranslateY}px, 0) scale(${liveZoomScale})`
+          : `translate3d(${translateX}px, ${translateY}px, 0)`,
+        "transform",
+        "0 0"
+      );
     };
 
     applyCanvasTransform(
@@ -6505,6 +6645,20 @@ function XlsxGrid({
     if (matchesLiveViewport && matchesStateViewport) {
       return;
     }
+
+    const shouldCommitDeferredViewport =
+      !matchesStateViewport
+      && (
+        stateViewport.width !== nextViewport.width
+        || stateViewport.height !== nextViewport.height
+        || Math.abs(nextViewport.left - stateViewport.left) >= CANVAS_DEFERRED_VIEWPORT_SYNC_THRESHOLD_PX
+        || Math.abs(nextViewport.top - stateViewport.top) >= CANVAS_DEFERRED_VIEWPORT_SYNC_THRESHOLD_PX
+      );
+    if (!shouldCommitDeferredViewport) {
+      pendingDrawingViewportRef.current = null;
+      return;
+    }
+
     pendingDrawingViewportRef.current = nextViewport;
     if (drawingViewportFrameRef.current !== null) {
       return;
@@ -6887,6 +7041,7 @@ function XlsxGrid({
   }, [charts, images, shapes]);
   const shouldVirtualizeRows = visibleRows.length > 0;
   const shouldVirtualizeCols = visibleCols.length > 0 && frozenCols.length === 0;
+  const shouldUseDomVirtualizer = !experimentalCanvas;
   const getScrollElement = React.useCallback(() => scrollRef.current, []);
   const estimateRowSize = React.useCallback(
     (index: number) => displayEffectiveRowHeights[index] ?? displayDefaultRowHeight,
@@ -6901,6 +7056,7 @@ function XlsxGrid({
 
   const rowVirtualizer = useVirtualizer({
     count: visibleRows.length,
+    enabled: shouldUseDomVirtualizer,
     estimateSize: estimateRowSize,
     getScrollElement,
     getItemKey: getRowItemKey,
@@ -6908,14 +7064,15 @@ function XlsxGrid({
   });
   const colVirtualizer = useVirtualizer({
     count: visibleCols.length,
+    enabled: shouldUseDomVirtualizer,
     estimateSize: estimateColSize,
     getScrollElement,
     getItemKey: getColItemKey,
     horizontal: true,
     overscan: 6
   });
-  const currentRowVirtualItems = rowVirtualizer.getVirtualItems();
-  const currentColVirtualItems = colVirtualizer.getVirtualItems();
+  const currentRowVirtualItems = shouldUseDomVirtualizer ? rowVirtualizer.getVirtualItems() : EMPTY_VIRTUAL_ITEMS;
+  const currentColVirtualItems = shouldUseDomVirtualizer ? colVirtualizer.getVirtualItems() : EMPTY_VIRTUAL_ITEMS;
   const frozenRowVirtualIndices = React.useMemo(
     () => frozenRows
       .map((row) => rowIndexByActual.get(row))
@@ -7197,10 +7354,12 @@ function XlsxGrid({
       scroller.scrollTop = (scroller.scrollTop / previousZoomFactor) * zoomFactor;
     }
     previousZoomFactorRef.current = zoomFactor;
-    rowVirtualizer.measure();
-    colVirtualizer.measure();
+    if (shouldUseDomVirtualizer) {
+      rowVirtualizer.measure();
+      colVirtualizer.measure();
+    }
     syncDrawingViewport(scroller, { immediate: true });
-  }, [syncDrawingViewport, zoomFactor]);
+  }, [shouldUseDomVirtualizer, syncDrawingViewport, zoomFactor]);
 
   React.useLayoutEffect(() => {
     syncDrawingViewport(scrollRef.current, { immediate: true });
@@ -7308,7 +7467,7 @@ function XlsxGrid({
       ? sumPrefixRange(actualColPrefixSums, 0, initialUsedCol - 1)
       : 0;
 
-    if (shouldVirtualizeRows) {
+    if (shouldUseDomVirtualizer && shouldVirtualizeRows) {
       rowVirtualizer.scrollToOffset(initialScrollTop);
     } else if (scrollRef.current) {
       scrollRef.current.scrollTop = initialScrollTop;
@@ -7316,7 +7475,7 @@ function XlsxGrid({
     if (scrollRef.current) {
       scrollRef.current.scrollLeft = initialScrollLeft;
     }
-    if (shouldVirtualizeCols && frozenCols.length === 0) {
+    if (shouldUseDomVirtualizer && shouldVirtualizeCols && frozenCols.length === 0) {
       colVirtualizer.scrollToOffset(initialScrollLeft);
     }
     if (scrollRef.current) {
@@ -7337,6 +7496,7 @@ function XlsxGrid({
     isWorkerBacked,
     shouldVirtualizeCols,
     shouldVirtualizeRows,
+    shouldUseDomVirtualizer,
     syncDrawingViewport,
     rowVirtualizer,
     visibleCols,
@@ -7361,13 +7521,21 @@ function XlsxGrid({
   }, [activeSheetIndex, pendingNavigation, selectCell]);
 
   React.useEffect(() => {
-    if (shouldVirtualizeRows) {
+    if (shouldUseDomVirtualizer && shouldVirtualizeRows) {
       rowVirtualizer.measure();
     }
-    if (shouldVirtualizeCols) {
+    if (shouldUseDomVirtualizer && shouldVirtualizeCols) {
       colVirtualizer.measure();
     }
-  }, [activeSheetIndex, revision, shouldVirtualizeCols, shouldVirtualizeRows, visibleCols.length, visibleRows.length]);
+  }, [
+    activeSheetIndex,
+    revision,
+    shouldUseDomVirtualizer,
+    shouldVirtualizeCols,
+    shouldVirtualizeRows,
+    visibleCols.length,
+    visibleRows.length
+  ]);
 
   const handleScrollerScroll = React.useCallback((event: React.UIEvent<HTMLDivElement>) => {
     const currentScroller = event.currentTarget;
@@ -8517,14 +8685,14 @@ function XlsxGrid({
       },
       left: {
         cols: frozenColItems,
-        rows: frozenRows.length > 0 ? canvasVisibleRowItems : scrollRowItems
+        rows: scrollRowItems
       },
       scroll: {
-        cols: frozenCols.length > 0 ? canvasVisibleColItems : scrollColItems,
-        rows: frozenRows.length > 0 ? canvasVisibleRowItems : scrollRowItems
+        cols: scrollColItems,
+        rows: scrollRowItems
       },
       top: {
-        cols: frozenCols.length > 0 ? canvasVisibleColItems : scrollColItems,
+        cols: scrollColItems,
         rows: frozenRowItems
       }
     } satisfies Record<FrozenDrawingPane, {
@@ -8716,6 +8884,15 @@ function XlsxGrid({
         : imageRects
     ),
     [imageRects, selectedImageId, shouldBakeCanvasImages]
+  );
+  const hasCanvasDomDrawingOverlays = Boolean(
+    showImages
+    && (
+      chartRects.length > 0
+      || domShapeRects.length > 0
+      || domFormControlRects.length > 0
+      || domImageRects.length > 0
+    )
   );
   const bakedCanvasDrawingSignature = React.useMemo(() => {
     if (!shouldBakeCanvasStaticDrawings) {
@@ -9824,9 +10001,9 @@ function XlsxGrid({
   const cornerBodyCanvasWidth = leftBodyCanvasWidth;
   const cornerBodyCanvasHeight = topBodyCanvasHeight;
   const topFrozenHeaderCanvasWidth = leftBodyCanvasWidth;
-  const topScrollHeaderCanvasWidth = scrollBodyViewportWidth;
+  const topScrollHeaderCanvasWidth = scrollBodyCanvasWidth;
   const leftFrozenHeaderCanvasHeight = topBodyCanvasHeight;
-  const leftScrollHeaderCanvasHeight = scrollBodyViewportHeight;
+  const leftScrollHeaderCanvasHeight = scrollBodyCanvasHeight;
   const canvasColumnHeaderCells = React.useMemo(
     () =>
       canvasVisibleColItems.flatMap<CanvasStickyColumnHeaderCell>((column) => {
@@ -9841,7 +10018,7 @@ function XlsxGrid({
           height: displayHeaderHeight,
           isFrozen,
           left: rect.left,
-          localLeft: rect.left - (isFrozen ? displayRowHeaderWidth : frozenPaneRight),
+          localLeft: rect.left - (isFrozen ? displayRowHeaderWidth : scrollBodyCanvasLeft),
           width: rect.width
         }];
       }),
@@ -9849,8 +10026,8 @@ function XlsxGrid({
       canvasVisibleColItems,
       displayHeaderHeight,
       displayRowHeaderWidth,
-      frozenPaneRight,
       resolveCanvasColumnHeaderRect,
+      scrollBodyCanvasLeft,
       stickyLeftByCol
     ]
   );
@@ -9867,15 +10044,15 @@ function XlsxGrid({
           actualRow: row.actualRow,
           height: rect.height,
           isFrozen,
-          localTop: rect.top - (isFrozen ? displayHeaderHeight : frozenPaneBottom),
+          localTop: rect.top - (isFrozen ? displayHeaderHeight : scrollBodyCanvasTop),
           top: rect.top
         }];
       }),
     [
       canvasVisibleRowItems,
       displayHeaderHeight,
-      frozenPaneBottom,
       resolveCanvasRowHeaderRect,
+      scrollBodyCanvasTop,
       stickyTopByRow
     ]
   );
@@ -10212,6 +10389,29 @@ function XlsxGrid({
       return;
     }
 
+    const canvasProfileTarget = typeof window !== "undefined"
+      ? (window as unknown as {
+          __xlsxCanvasProfile?: Array<{
+            bodyMs: number;
+            culledCells: number;
+            dirtyRects: number;
+            lookedUpCells: number;
+            paintedCells: number;
+            repaintBody: boolean;
+            repaintHeaders: boolean;
+            renderToLayoutMs: number;
+            totalMs: number;
+          }>;
+        }).__xlsxCanvasProfile
+      : undefined;
+    const canvasProfileStart = canvasProfileTarget ? performance.now() : 0;
+    let canvasProfileBodyStart = 0;
+    let canvasProfileBodyMs = 0;
+    let canvasProfileCulledCells = 0;
+    let canvasProfileDirtyRects = 0;
+    let canvasProfileLookedUpCells = 0;
+    let canvasProfilePaintedCells = 0;
+
     const dpr = typeof window === "undefined" ? 1 : Math.max(1, window.devicePixelRatio || 1);
 
     function configureCanvas(
@@ -10238,7 +10438,7 @@ function XlsxGrid({
       if (canvas.style.height !== `${height}px`) {
         canvas.style.height = `${height}px`;
       }
-      const context = canvas.getContext("2d");
+      const context = canvas.getContext("2d", { alpha: false });
       if (!context) {
         return null;
       }
@@ -10547,7 +10747,7 @@ function XlsxGrid({
         const widthPx = paragraph.runs.reduce((total, run) => {
           const fontSize = ((run.fontSizePt ?? 11) * 96 / 72) * zoomFactor;
           context.font = `${run.italic ? "italic " : ""}${run.bold ? "700 " : "400 "}${fontSize}px ${run.fontFamily ?? "Calibri, sans-serif"}`;
-          return total + context.measureText(run.text).width;
+          return total + measureCanvasTextWidth(context, run.text);
         }, 0);
         return { lineHeight, widthPx };
       });
@@ -10582,7 +10782,7 @@ function XlsxGrid({
           const textY = y + metric.lineHeight / 2;
           context.fillText(run.text, x, textY);
           if (run.underline && run.text.length > 0) {
-            const textWidthPx = context.measureText(run.text).width;
+            const textWidthPx = measureCanvasTextWidth(context, run.text);
             context.strokeStyle = run.color ?? "#000000";
             context.lineWidth = Math.max(1, zoomFactor * 0.75);
             context.beginPath();
@@ -10590,7 +10790,7 @@ function XlsxGrid({
             context.lineTo(x + textWidthPx, textY + Math.max(2, fontSize * 0.28));
             context.stroke();
           }
-          x += context.measureText(run.text).width;
+          x += measureCanvasTextWidth(context, run.text);
         });
         y += metric.lineHeight;
       });
@@ -10624,7 +10824,12 @@ function XlsxGrid({
           rect.width / Math.max(1, vectorShape.viewBox.width),
           rect.height / Math.max(1, vectorShape.viewBox.height)
         );
-        const path = new Path2D(vectorShape.path);
+        const path = getCachedCanvasPath2D(vectorShape.path);
+        if (!path) {
+          context.restore();
+          context.restore();
+          return;
+        }
         if (fillColor !== "transparent") {
           context.fill(path);
         }
@@ -10674,7 +10879,7 @@ function XlsxGrid({
         context.stroke();
         if (label) {
           context.fillStyle = SHEET_SURFACE;
-          const labelWidth = Math.min(rect.width - 16 * zoomFactor, context.measureText(label).width + 8 * zoomFactor);
+          const labelWidth = Math.min(rect.width - 16 * zoomFactor, measureCanvasTextWidth(context, label) + 8 * zoomFactor);
           context.fillRect(rect.left + 8 * zoomFactor, rect.top, labelWidth, fontSizePx * 1.2);
           context.fillStyle = textColor;
           context.textAlign = "left";
@@ -10786,6 +10991,7 @@ function XlsxGrid({
 
     const cellPaneOrder: FrozenDrawingPane[] = ["scroll", "top", "left", "corner"];
     if (shouldRepaintBody) {
+      canvasProfileBodyStart = canvasProfileTarget ? performance.now() : 0;
       for (const pane of Object.keys(bodyContexts) as FrozenDrawingPane[]) {
         const context = bodyContexts[pane];
         const bounds = paneBounds[pane];
@@ -10828,6 +11034,7 @@ function XlsxGrid({
         }
 
         bodyDirtyRectsByPane[pane] = dirtyRects;
+        canvasProfileDirtyRects += dirtyRects.length;
         if (dirtyRects.length === 0) {
           continue;
         }
@@ -10853,6 +11060,22 @@ function XlsxGrid({
         ) {
           continue;
         }
+        let hasPendingGridlinePath = false;
+        const enqueueGridlinePath = () => {
+          if (!hasPendingGridlinePath) {
+            paneContext.beginPath();
+            hasPendingGridlinePath = true;
+          }
+        };
+        const flushPendingGridlines = () => {
+          if (!hasPendingGridlinePath) {
+            return;
+          }
+          paneContext.strokeStyle = palette.border;
+          paneContext.lineWidth = 1;
+          paneContext.stroke();
+          hasPendingGridlinePath = false;
+        };
         const drawnMergedAnchorKeys = new Set<string>();
         for (const rowItem of paneAxisItems.rows) {
           for (const colItem of paneAxisItems.cols) {
@@ -10860,6 +11083,47 @@ function XlsxGrid({
           const anchorCell = resolveMergeAnchorCell(cell);
           const anchorKey = `${anchorCell.row}:${anchorCell.col}`;
           let drawCell = anchorCell;
+
+          const drawRowIndex = rowIndexByActual.get(drawCell.row);
+          const drawColIndex = colIndexByActual.get(drawCell.col);
+          if (drawRowIndex === undefined || drawColIndex === undefined) {
+            continue;
+          }
+
+          const baseCellLeft = displayRowHeaderWidth + (colPrefixSums[drawColIndex] ?? 0);
+          const baseCellTop = displayHeaderHeight + (rowPrefixSums[drawRowIndex] ?? 0);
+          const useFrozenHorizontalPosition = pane === "left" || pane === "corner";
+          const useFrozenVerticalPosition = pane === "top" || pane === "corner";
+          const roughLocalRect = {
+            height: displayEffectiveRowHeights[drawRowIndex] ?? rowItem.size,
+            left: (
+              useFrozenHorizontalPosition
+                ? (stickyLeftByCol.get(drawCell.col) ?? (baseCellLeft - drawingViewport.left))
+                : (baseCellLeft - drawingViewport.left)
+            ) - paneBoundsForCell.left,
+            top: (
+              useFrozenVerticalPosition
+                ? (stickyTopByRow.get(drawCell.row) ?? (baseCellTop - drawingViewport.top))
+                : (baseCellTop - drawingViewport.top)
+            ) - paneBoundsForCell.top,
+            width: displayEffectiveColWidths[drawColIndex] ?? colItem.size
+          };
+          const isMergedSecondaryProbe = anchorCell.row !== cell.row || anchorCell.col !== cell.col;
+          if (
+            !isMergedSecondaryProbe
+            && !intersectsCanvasDirtyRects(
+              roughLocalRect.left - CANVAS_DIRTY_CELL_CULL_MARGIN_PX,
+              roughLocalRect.top - CANVAS_DIRTY_CELL_CULL_MARGIN_PX,
+              roughLocalRect.width + CANVAS_DIRTY_CELL_CULL_MARGIN_PX * 2,
+              roughLocalRect.height + CANVAS_DIRTY_CELL_CULL_MARGIN_PX * 2,
+              paneDirtyRects
+            )
+          ) {
+            canvasProfileCulledCells += 1;
+            continue;
+          }
+
+          canvasProfileLookedUpCells += 1;
           let cellData = getCellData(drawCell.row, drawCell.col);
           if ((cellData.colSpan || cellData.rowSpan) && drawnMergedAnchorKeys.has(anchorKey)) {
             continue;
@@ -10871,19 +11135,11 @@ function XlsxGrid({
             drawnMergedAnchorKeys.add(anchorKey);
           }
 
-          const drawRowIndex = rowIndexByActual.get(drawCell.row);
-          const drawColIndex = colIndexByActual.get(drawCell.col);
-          if (drawRowIndex === undefined || drawColIndex === undefined) {
-            continue;
-          }
-
           const displayRect = cellData.colSpan || cellData.rowSpan
             ? resolveCellDisplayRect(drawCell)
             : null;
-          const baseLeft = displayRect?.left ?? (displayRowHeaderWidth + (colPrefixSums[drawColIndex] ?? 0));
-          const baseTop = displayRect?.top ?? (displayHeaderHeight + (rowPrefixSums[drawRowIndex] ?? 0));
-          const useFrozenHorizontalPosition = pane === "left" || pane === "corner";
-          const useFrozenVerticalPosition = pane === "top" || pane === "corner";
+          const baseLeft = displayRect?.left ?? baseCellLeft;
+          const baseTop = displayRect?.top ?? baseCellTop;
           const localRect = {
             height: displayRect?.height ?? (displayEffectiveRowHeights[drawRowIndex] ?? rowItem.size),
             left: (
@@ -10909,9 +11165,11 @@ function XlsxGrid({
             continue;
           }
           if (!intersectsCanvasDirtyRects(localRect.left, localRect.top, drawableWidth, localRect.height, paneDirtyRects)) {
+            canvasProfileCulledCells += 1;
             continue;
           }
 
+          canvasProfilePaintedCells += 1;
           const cellStyle = cellData.style;
           const canvasCellStyle = cellData.canvas ?? buildCanvasCellStyleCache(cellStyle);
           const fillColor = cellData.conditionalColorScale?.color
@@ -10924,6 +11182,9 @@ function XlsxGrid({
             || gradientFill !== null
             || (typeof cellStyle.backgroundColor === "string"
               && cellStyle.backgroundColor !== sheetSurface);
+          if (hasExplicitCellFill || cellData.chartHighlight) {
+            flushPendingGridlines();
+          }
           paneContext.fillStyle = gradientFill ?? fillColor;
           paneContext.fillRect(localRect.left, localRect.top, localRect.width, localRect.height);
           if (cellData.chartHighlight) {
@@ -10980,10 +11241,8 @@ function XlsxGrid({
           const resolvedRightBorder = resolveCanvasBoundaryBorder(rightBorder, rightNeighborLeftBorder);
           const resolvedBottomBorder = resolveCanvasBoundaryBorder(bottomBorder, bottomNeighborTopBorder);
 
-          if (showGridLines && !hasExplicitCellFill) {
-            paneContext.strokeStyle = palette.border;
-            paneContext.lineWidth = 1;
-            paneContext.beginPath();
+          if (showGridLines && !hasExplicitCellFill && (!resolvedRightBorder || !resolvedBottomBorder)) {
+            enqueueGridlinePath();
             if (!resolvedRightBorder) {
               paneContext.moveTo(localRect.left + localRect.width - 0.5, localRect.top);
               paneContext.lineTo(localRect.left + localRect.width - 0.5, localRect.top + localRect.height);
@@ -10992,7 +11251,10 @@ function XlsxGrid({
               paneContext.moveTo(localRect.left, localRect.top + localRect.height - 0.5);
               paneContext.lineTo(localRect.left + localRect.width, localRect.top + localRect.height - 0.5);
             }
-            paneContext.stroke();
+          }
+
+          if (topBorder || resolvedRightBorder || resolvedBottomBorder || leftBorder || cellData.chartHighlight) {
+            flushPendingGridlines();
           }
 
           if (topBorder && drawRowIndex === 0) {
@@ -11027,11 +11289,27 @@ function XlsxGrid({
             }
           }
 
+          const rawText = cellData.value ?? "";
+          const shouldDrawCanvasContent = (
+            cellData.checkboxState != null
+            || cellData.sparkline
+            || rawText.length > 0
+            || cellData.conditionalIcon
+            || cellData.isTableHeader
+          );
+          if (!shouldDrawCanvasContent) {
+            continue;
+          }
+
           const padding = canvasCellStyle.padding;
           const contentLeft = localRect.left + padding.left;
           const contentTop = localRect.top + padding.top;
           const contentWidth = Math.max(0, localRect.width - padding.left - padding.right);
           const contentHeight = Math.max(0, localRect.height - padding.top - padding.bottom);
+          if (contentWidth <= 0 || contentHeight <= 0) {
+            continue;
+          }
+
           const activeFontSizePx = cellData.shrinkToFitFontSizePx
             ?? resolveCanvasFontSizePx(cellStyle, 12 * zoomFactor);
           const textClipOverscan = Math.max(
@@ -11039,6 +11317,8 @@ function XlsxGrid({
             zoomFactor * 1.5,
             activeFontSizePx * (cellData.textRotationDeg ? 0.75 : 0.18)
           );
+
+          flushPendingGridlines();
           paneContext.save();
           paneContext.beginPath();
           paneContext.rect(
@@ -11185,7 +11465,6 @@ function XlsxGrid({
               ? Math.max(0, cellData.spillWidth - trailingInset)
               : null;
             const maxTextWidth = spillMaxWidth ?? Math.max(0, contentWidth - trailingInset);
-            const rawText = cellData.value ?? "";
             const textColor = canvasCellStyle.textColor;
             const shouldEllipsizeText = canvasCellStyle.textOverflowEllipsis;
             const shouldWrapText = canvasCellStyle.usesWrappedText || rawText.includes("\n");
@@ -11225,7 +11504,7 @@ function XlsxGrid({
                 const textY = textBlockTop + (lineIndex * lineHeight) + (lineHeight / 2);
                 paneContext.fillText(line, textX, textY);
                 if (canvasCellStyle.textDecoration?.includes("underline") && line.length > 0) {
-                  const measured = Math.min(maxTextWidth, paneContext.measureText(line).width);
+                  const measured = Math.min(maxTextWidth, measureCanvasTextWidth(paneContext, line));
                   const underlineStartX = align === "right"
                     ? textX - measured
                     : align === "center"
@@ -11268,8 +11547,8 @@ function XlsxGrid({
               paneContext.fillText(text, textX, textY);
               if (canvasCellStyle.textDecoration?.includes("underline") && text.length > 0) {
                 const measured = shouldEllipsizeText
-                  ? Math.min(maxTextWidth, paneContext.measureText(text).width)
-                  : paneContext.measureText(text).width;
+                  ? Math.min(maxTextWidth, measureCanvasTextWidth(paneContext, text))
+                  : measureCanvasTextWidth(paneContext, text);
                 const underlineStartX = align === "right"
                   ? textX - measured
                   : align === "center"
@@ -11301,6 +11580,7 @@ function XlsxGrid({
           paneContext.restore();
         }
       }
+        flushPendingGridlines();
       }
 
       for (const pane of cellPaneOrder) {
@@ -11320,8 +11600,8 @@ function XlsxGrid({
           paneContext.fillText(spillText.text, spillText.textX, spillText.textY);
           if (spillText.textDecoration?.includes("underline") && spillText.text.length > 0) {
             const measured = spillText.ellipsize
-              ? Math.min(spillText.maxWidth, paneContext.measureText(spillText.text).width)
-              : paneContext.measureText(spillText.text).width;
+              ? Math.min(spillText.maxWidth, measureCanvasTextWidth(paneContext, spillText.text))
+              : measureCanvasTextWidth(paneContext, spillText.text);
             const underlineStartX = spillText.align === "right"
               ? spillText.textX - measured
               : spillText.align === "center"
@@ -11345,6 +11625,7 @@ function XlsxGrid({
         }
         drawBakedCanvasDrawings(pane, paneContext, bodyDirtyRectsByPane[pane]);
       }
+      canvasProfileBodyMs = canvasProfileTarget ? performance.now() - canvasProfileBodyStart : 0;
     }
 
     if (shouldRepaintHeaders && cornerContext) {
@@ -11524,6 +11805,22 @@ function XlsxGrid({
       paintedHeaderCanvasSignatureRef.current = nextHeaderCanvasSignature;
     }
     applyCanvasViewportCompensation();
+    if (canvasProfileTarget) {
+      canvasProfileTarget.push({
+        bodyMs: canvasProfileBodyMs,
+        culledCells: canvasProfileCulledCells,
+        dirtyRects: canvasProfileDirtyRects,
+        lookedUpCells: canvasProfileLookedUpCells,
+        paintedCells: canvasProfilePaintedCells,
+        repaintBody: shouldRepaintBody,
+        repaintHeaders: shouldRepaintHeaders,
+        renderToLayoutMs: canvasProfileStart - xlsxGridRenderStart,
+        totalMs: performance.now() - canvasProfileStart
+      });
+      if (canvasProfileTarget.length > 500) {
+        canvasProfileTarget.splice(0, canvasProfileTarget.length - 500);
+      }
+    }
   }, [
     activeSheet,
     applyCanvasViewportCompensation,
@@ -11557,7 +11854,6 @@ function XlsxGrid({
     palette,
     resolveCellDisplayRect,
     resolveMergeAnchorCell,
-    resizeGuide,
     rowIndexByActual,
     rowPrefixSums,
     selectionHeaderSurface,
@@ -11829,7 +12125,7 @@ function XlsxGrid({
       start: virtualRow?.start ?? (rowPrefixSums[index] ?? 0)
     };
   });
-  const totalHeight = shouldVirtualizeRows
+  const totalHeight = shouldUseDomVirtualizer && shouldVirtualizeRows
     ? rowVirtualizer.getTotalSize()
     : (rowPrefixSums[rowPrefixSums.length - 1] ?? 0);
   const totalWidth = totalContentWidth + displayRowHeaderWidth;
@@ -11964,7 +12260,7 @@ function XlsxGrid({
   const canvasTopScrollHeaderStyle: React.CSSProperties = {
     ...canvasHeaderBaseStyle,
     display: topScrollHeaderCanvasWidth > 0 && drawingViewport.height > 0 ? "block" : "none",
-    left: frozenPaneRight,
+    left: scrollBodyCanvasLeft,
     top: 0,
     zIndex: canvasHeaderOverlayZIndex
   };
@@ -11979,7 +12275,7 @@ function XlsxGrid({
     ...canvasHeaderBaseStyle,
     display: leftScrollHeaderCanvasHeight > 0 && drawingViewport.width > 0 ? "block" : "none",
     left: 0,
-    top: frozenPaneBottom,
+    top: scrollBodyCanvasTop,
     zIndex: canvasHeaderOverlayZIndex
   };
   const canvasCornerHeaderStyle: React.CSSProperties = {
@@ -13254,7 +13550,7 @@ function XlsxGrid({
                     onPointerDown={handleCanvasBodyPointerDown}
                     style={canvasCornerBodyStyle}
                   />
-                  {showImages ? (
+                  {hasCanvasDomDrawingOverlays ? (
                     <>
                       <div style={canvasScrollOverlayPaneStyle}>
                         <div
@@ -14277,7 +14573,7 @@ export function useXlsxViewerThumbnails(
           return false;
         }
 
-        const context = canvas.getContext("2d");
+        const context = canvas.getContext("2d", { alpha: false });
         if (!context) {
           return false;
         }
@@ -14303,9 +14599,10 @@ export function useXlsxViewerThumbnails(
 
         context.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
         context.clearRect(0, 0, Math.max(1, sourceWidth), Math.max(1, sourceHeight));
+        const thumbnailSheetSurface = resolveSheetSurface(sheet, palette);
         context.fillStyle = palette.canvas;
         context.fillRect(0, 0, Math.max(1, sourceWidth), Math.max(1, sourceHeight));
-        context.fillStyle = resolveSheetSurface(sheet, palette);
+        context.fillStyle = thumbnailSheetSurface;
         context.fillRect(rowHeaderWidth, headerHeight, Math.max(1, colAxis.totalSize), Math.max(1, rowAxis.totalSize));
 
         if (includeHeaders) {
@@ -14448,12 +14745,12 @@ export function useXlsxViewerThumbnails(
               ? resolveCanvasGradientFill(context, rect, cellData.style.backgroundImage)
               : null;
             const fillColor = cellData.conditionalColorScale?.color
-              ?? (typeof cellData.style.backgroundColor === "string" ? cellData.style.backgroundColor : resolveSheetSurface(sheet, palette));
+              ?? (typeof cellData.style.backgroundColor === "string" ? cellData.style.backgroundColor : thumbnailSheetSurface);
             const hasExplicitCellFill =
               cellData.conditionalColorScale !== null
               || gradientFill !== null
               || (typeof cellData.style.backgroundColor === "string"
-                && cellData.style.backgroundColor !== resolveSheetSurface(sheet, palette));
+                && cellData.style.backgroundColor !== thumbnailSheetSurface);
 
             context.fillStyle = gradientFill ?? fillColor;
             context.fillRect(rect.left, rect.top, rect.width, rect.height);
@@ -14513,12 +14810,25 @@ export function useXlsxViewerThumbnails(
               strokeCanvasBorderSide(context, "left", rect, canvasCellStyle.leftBorder);
             }
 
+            const rawText = cellData.value ?? "";
+            const shouldDrawThumbnailContent = (
+              cellData.checkboxState != null
+              || cellData.sparkline
+              || rawText.length > 0
+              || cellData.conditionalIcon
+            );
+            if (!shouldDrawThumbnailContent) {
+              continue;
+            }
+
             const padding = canvasCellStyle.padding;
             const contentLeft = rect.left + padding.left;
             const contentTop = rect.top + padding.top;
             const contentWidth = Math.max(0, rect.width - padding.left - padding.right);
             const contentHeight = Math.max(0, rect.height - padding.top - padding.bottom);
-            const rawText = cellData.value ?? "";
+            if (contentWidth <= 0 || contentHeight <= 0) {
+              continue;
+            }
 
             context.save();
             context.beginPath();
