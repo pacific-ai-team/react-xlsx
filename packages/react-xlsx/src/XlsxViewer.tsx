@@ -2531,6 +2531,54 @@ function resolveShapeVector(shape: XlsxShape) {
   return buildPresetShapePath(shape);
 }
 
+function drawCanvasRoundedRect(
+  context: CanvasRenderingContext2D,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  radius: number
+) {
+  const safeRadius = Math.max(0, Math.min(radius, width / 2, height / 2));
+  context.beginPath();
+  context.moveTo(left + safeRadius, top);
+  context.lineTo(left + width - safeRadius, top);
+  context.quadraticCurveTo(left + width, top, left + width, top + safeRadius);
+  context.lineTo(left + width, top + height - safeRadius);
+  context.quadraticCurveTo(left + width, top + height, left + width - safeRadius, top + height);
+  context.lineTo(left + safeRadius, top + height);
+  context.quadraticCurveTo(left, top + height, left, top + height - safeRadius);
+  context.lineTo(left, top + safeRadius);
+  context.quadraticCurveTo(left, top, left + safeRadius, top);
+  context.closePath();
+}
+
+function applyCanvasShapeDash(context: CanvasRenderingContext2D, dash: string | undefined, lineWidth: number) {
+  if (!dash) {
+    context.setLineDash([]);
+    return;
+  }
+
+  const unit = Math.max(1, lineWidth);
+  switch (dash) {
+    case "dash":
+      context.setLineDash([4 * unit, 3 * unit]);
+      break;
+    case "dashDot":
+      context.setLineDash([4 * unit, 2 * unit, unit, 2 * unit]);
+      break;
+    case "dot":
+      context.setLineDash([unit, 2 * unit]);
+      break;
+    case "lgDash":
+      context.setLineDash([8 * unit, 3 * unit]);
+      break;
+    default:
+      context.setLineDash([]);
+      break;
+  }
+}
+
 function resolveShapeLineEndMarker(
   type: string | undefined,
   markerId: string,
@@ -4684,6 +4732,7 @@ type CellRenderData = {
 
 type PaintedBodyCanvasSignature = {
   activeSheet: XlsxSheetData | null;
+  bakedDrawingSignature: string;
   bodyHeight: number;
   bodyWidth: number;
   colSignature: string;
@@ -5922,6 +5971,12 @@ function XlsxGrid({
   const canvasTopOverlayContentRef = React.useRef<HTMLDivElement>(null);
   const canvasLeftOverlayContentRef = React.useRef<HTMLDivElement>(null);
   const canvasCornerOverlayContentRef = React.useRef<HTMLDivElement>(null);
+  const canvasImageCacheRef = React.useRef(new Map<string, {
+    failed: boolean;
+    image: HTMLImageElement;
+    loaded: boolean;
+    src: string;
+  }>());
   const selectionOverlayRef = React.useRef<HTMLDivElement>(null);
   const activeValidationOverlayRef = React.useRef<HTMLDivElement>(null);
   const fillHandleRef = React.useRef<HTMLDivElement>(null);
@@ -6058,6 +6113,7 @@ function XlsxGrid({
   const [fillPreviewRange, setFillPreviewRange] = React.useState<XlsxCellRange | null>(null);
   const [chartPreviewRect, setChartPreviewRect] = React.useState<{ id: string; rect: XlsxImageRect } | null>(null);
   const [liveGestureZoom, setLiveGestureZoom] = React.useState<LiveGestureZoomState | null>(null);
+  const [canvasImageLoadVersion, setCanvasImageLoadVersion] = React.useState(0);
   const liveDrawingViewportRef = React.useRef<DrawingViewport>({
     height: 0,
     left: 0,
@@ -6085,7 +6141,7 @@ function XlsxGrid({
   const skipNextChartClickRef = React.useRef<string | null>(null);
   const paneDrawingNodesCacheRef = React.useRef<{
     chartRects: Array<{ chart: XlsxChart; rect: XlsxImageRect }>;
-    drawingViewport: DrawingViewport;
+    drawingViewportSignature: string;
     formControlRects: Array<{ control: XlsxFormControl; rect: XlsxImageRect }>;
     imageRects: Array<{ image: XlsxImage; rect: XlsxImageRect }>;
     palette: ViewerPalette;
@@ -8627,6 +8683,63 @@ function XlsxGrid({
       visibleRows
     ]
   );
+  const shouldBakeCanvasStaticDrawings = Boolean(experimentalCanvas && readOnly && showImages);
+  const shouldBakeCanvasImages = Boolean(shouldBakeCanvasStaticDrawings && !renderImage && !renderImageSelection);
+  const bakedShapeRects = React.useMemo(
+    () => (shouldBakeCanvasStaticDrawings ? shapeRects.filter(({ shape }) => !shape.hyperlink) : []),
+    [shapeRects, shouldBakeCanvasStaticDrawings]
+  );
+  const domShapeRects = React.useMemo(
+    () => (shouldBakeCanvasStaticDrawings ? shapeRects.filter(({ shape }) => shape.hyperlink) : shapeRects),
+    [shapeRects, shouldBakeCanvasStaticDrawings]
+  );
+  const bakedFormControlRects = React.useMemo(
+    () => (shouldBakeCanvasStaticDrawings ? formControlRects : []),
+    [formControlRects, shouldBakeCanvasStaticDrawings]
+  );
+  const domFormControlRects = React.useMemo(
+    () => (shouldBakeCanvasStaticDrawings ? [] : formControlRects),
+    [formControlRects, shouldBakeCanvasStaticDrawings]
+  );
+  const bakedImageRects = React.useMemo(
+    () => (
+      shouldBakeCanvasImages
+        ? imageRects.filter(({ image }) => !image.hyperlink && selectedImageId !== image.id)
+        : []
+    ),
+    [imageRects, selectedImageId, shouldBakeCanvasImages]
+  );
+  const domImageRects = React.useMemo(
+    () => (
+      shouldBakeCanvasImages
+        ? imageRects.filter(({ image }) => image.hyperlink || selectedImageId === image.id)
+        : imageRects
+    ),
+    [imageRects, selectedImageId, shouldBakeCanvasImages]
+  );
+  const bakedCanvasDrawingSignature = React.useMemo(() => {
+    if (!shouldBakeCanvasStaticDrawings) {
+      return "";
+    }
+
+    const shapeSignature = bakedShapeRects
+      .map(({ rect, shape }) => `s:${shape.id}:${shape.zIndex}:${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`)
+      .join("|");
+    const controlSignature = bakedFormControlRects
+      .map(({ control, rect }) => `f:${control.id}:${control.zIndex}:${Boolean(control.checked)}:${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`)
+      .join("|");
+    const imageSignature = bakedImageRects
+      .map(({ image, rect }) => `i:${image.id}:${image.src}:${image.zIndex}:${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`)
+      .join("|");
+    return `${revision}:${canvasImageLoadVersion}:${shapeSignature}:${controlSignature}:${imageSignature}`;
+  }, [
+    bakedFormControlRects,
+    bakedImageRects,
+    bakedShapeRects,
+    canvasImageLoadVersion,
+    revision,
+    shouldBakeCanvasStaticDrawings
+  ]);
 
   const resolveMountedCellOverlayRect = React.useCallback((element: HTMLElement) => {
     const wrapper = wrapperRef.current;
@@ -10063,6 +10176,37 @@ function XlsxGrid({
     startCellSelection
   ]);
 
+  const getCanvasImage = React.useCallback((image: XlsxImage) => {
+    if (typeof Image === "undefined") {
+      return null;
+    }
+
+    const cacheKey = image.id;
+    const cached = canvasImageCacheRef.current.get(cacheKey);
+    if (cached && cached.src === image.src) {
+      return cached.loaded && !cached.failed ? cached.image : null;
+    }
+
+    const imageElement = new Image();
+    const entry = {
+      failed: false,
+      image: imageElement,
+      loaded: false,
+      src: image.src
+    };
+    canvasImageCacheRef.current.set(cacheKey, entry);
+    imageElement.onload = () => {
+      entry.loaded = true;
+      setCanvasImageLoadVersion((version) => version + 1);
+    };
+    imageElement.onerror = () => {
+      entry.failed = true;
+      setCanvasImageLoadVersion((version) => version + 1);
+    };
+    imageElement.src = image.src;
+    return null;
+  }, []);
+
   React.useLayoutEffect(() => {
     if (!experimentalCanvas) {
       return;
@@ -10115,6 +10259,7 @@ function XlsxGrid({
     const rangeSignature = buildRangeSignature(normalizedVisibleRange);
     const nextBodyCanvasSignature: PaintedBodyCanvasSignature = {
       activeSheet: activeSheet ?? null,
+      bakedDrawingSignature: bakedCanvasDrawingSignature,
       bodyHeight,
       bodyWidth,
       colSignature: buildRenderedAxisSignature(canvasVisibleColItems, (item) => item.index),
@@ -10145,6 +10290,7 @@ function XlsxGrid({
     const shouldRepaintBody = !(
       previousBodyCanvasSignature
       && previousBodyCanvasSignature.activeSheet === nextBodyCanvasSignature.activeSheet
+      && previousBodyCanvasSignature.bakedDrawingSignature === nextBodyCanvasSignature.bakedDrawingSignature
       && previousBodyCanvasSignature.bodyHeight === nextBodyCanvasSignature.bodyHeight
       && previousBodyCanvasSignature.bodyWidth === nextBodyCanvasSignature.bodyWidth
       && previousBodyCanvasSignature.colSignature === nextBodyCanvasSignature.colSignature
@@ -10174,6 +10320,7 @@ function XlsxGrid({
       shouldRepaintBody
       && previousBodyCanvasSignature
       && previousBodyCanvasSignature.activeSheet === nextBodyCanvasSignature.activeSheet
+      && previousBodyCanvasSignature.bakedDrawingSignature === nextBodyCanvasSignature.bakedDrawingSignature
       && previousBodyCanvasSignature.bodyHeight === nextBodyCanvasSignature.bodyHeight
       && previousBodyCanvasSignature.bodyWidth === nextBodyCanvasSignature.bodyWidth
       && previousBodyCanvasSignature.getCellData === nextBodyCanvasSignature.getCellData
@@ -10315,6 +10462,327 @@ function XlsxGrid({
     };
     let topScrollHeaderDirtyRects = buildFullCanvasDirtyRect(topScrollHeaderCanvasWidth, headerHeight);
     let leftScrollHeaderDirtyRects = buildFullCanvasDirtyRect(rowHeaderWidth, leftScrollHeaderCanvasHeight);
+    type BakedCanvasDrawingEntry =
+      | {
+          kind: "formControl";
+          control: XlsxFormControl;
+          rect: XlsxImageRect;
+          zIndex: number;
+        }
+      | {
+          kind: "image";
+          image: XlsxImage;
+          rect: XlsxImageRect;
+          zIndex: number;
+        }
+      | {
+          kind: "shape";
+          rect: XlsxImageRect;
+          shape: XlsxShape;
+          zIndex: number;
+        };
+    const bakedCanvasDrawingEntries: BakedCanvasDrawingEntry[] = shouldBakeCanvasStaticDrawings
+      ? [
+          ...bakedShapeRects.map(({ rect, shape }) => ({
+            kind: "shape" as const,
+            rect,
+            shape,
+            zIndex: shape.zIndex
+          })),
+          ...bakedFormControlRects.map(({ control, rect }) => ({
+            control,
+            kind: "formControl" as const,
+            rect,
+            zIndex: control.zIndex
+          })),
+          ...bakedImageRects.map(({ image, rect }) => ({
+            image,
+            kind: "image" as const,
+            rect,
+            zIndex: image.zIndex
+          }))
+        ].sort((left, right) => left.zIndex - right.zIndex)
+      : [];
+    const resolveBakedCanvasLocalRect = (rect: XlsxImageRect, pane: FrozenDrawingPane) => {
+      const bounds = paneBounds[pane];
+      const scrollX = pane === "scroll" || pane === "top" ? drawingViewport.left : 0;
+      const scrollY = pane === "scroll" || pane === "left" ? drawingViewport.top : 0;
+      return {
+        height: rect.height,
+        left: rect.left - scrollX - bounds.left,
+        top: rect.top - scrollY - bounds.top,
+        width: rect.width
+      };
+    };
+    const drawBakedShapeText = (
+      context: CanvasRenderingContext2D,
+      shape: XlsxShape,
+      left: number,
+      top: number,
+      width: number,
+      height: number
+    ) => {
+      if (shape.paragraphs.length === 0) {
+        return;
+      }
+
+      const inset = shape.textBox?.insetPx;
+      const paddingLeft = (inset?.left ?? 6) * zoomFactor;
+      const paddingRight = (inset?.right ?? 6) * zoomFactor;
+      const paddingTop = (inset?.top ?? 4) * zoomFactor;
+      const paddingBottom = (inset?.bottom ?? 4) * zoomFactor;
+      const textLeft = left + paddingLeft;
+      const textTop = top + paddingTop;
+      const textWidth = Math.max(0, width - paddingLeft - paddingRight);
+      const textHeight = Math.max(0, height - paddingTop - paddingBottom);
+      if (textWidth <= 0 || textHeight <= 0) {
+        return;
+      }
+
+      const lineMetrics = shape.paragraphs.map((paragraph) => {
+        const lineHeight = Math.max(
+          12 * zoomFactor,
+          ...paragraph.runs.map((run) => ((run.fontSizePt ?? 11) * 96 / 72) * zoomFactor * 1.2)
+        );
+        const widthPx = paragraph.runs.reduce((total, run) => {
+          const fontSize = ((run.fontSizePt ?? 11) * 96 / 72) * zoomFactor;
+          context.font = `${run.italic ? "italic " : ""}${run.bold ? "700 " : "400 "}${fontSize}px ${run.fontFamily ?? "Calibri, sans-serif"}`;
+          return total + context.measureText(run.text).width;
+        }, 0);
+        return { lineHeight, widthPx };
+      });
+      const totalTextHeight = lineMetrics.reduce((total, metric) => total + metric.lineHeight, 0);
+      let y = textTop;
+      if (shape.textBox?.verticalAlign === "middle") {
+        y = textTop + Math.max(0, (textHeight - totalTextHeight) / 2);
+      } else if (shape.textBox?.verticalAlign === "bottom") {
+        y = textTop + Math.max(0, textHeight - totalTextHeight);
+      }
+
+      context.save();
+      context.beginPath();
+      context.rect(textLeft, textTop, textWidth, textHeight);
+      context.clip();
+      context.textBaseline = "middle";
+      shape.paragraphs.forEach((paragraph, paragraphIndex) => {
+        const metric = lineMetrics[paragraphIndex] ?? { lineHeight: 14 * zoomFactor, widthPx: 0 };
+        let x = textLeft;
+        const align = paragraph.align ?? shape.textBox?.horizontalAlign ?? "left";
+        if (align === "center") {
+          x = textLeft + Math.max(0, (textWidth - metric.widthPx) / 2);
+        } else if (align === "right") {
+          x = textLeft + Math.max(0, textWidth - metric.widthPx);
+        }
+
+        paragraph.runs.forEach((run) => {
+          const fontSize = ((run.fontSizePt ?? 11) * 96 / 72) * zoomFactor;
+          context.font = `${run.italic ? "italic " : ""}${run.bold ? "700 " : "400 "}${fontSize}px ${run.fontFamily ?? "Calibri, sans-serif"}`;
+          context.fillStyle = run.color ?? "#000000";
+          context.textAlign = "left";
+          const textY = y + metric.lineHeight / 2;
+          context.fillText(run.text, x, textY);
+          if (run.underline && run.text.length > 0) {
+            const textWidthPx = context.measureText(run.text).width;
+            context.strokeStyle = run.color ?? "#000000";
+            context.lineWidth = Math.max(1, zoomFactor * 0.75);
+            context.beginPath();
+            context.moveTo(x, textY + Math.max(2, fontSize * 0.28));
+            context.lineTo(x + textWidthPx, textY + Math.max(2, fontSize * 0.28));
+            context.stroke();
+          }
+          x += context.measureText(run.text).width;
+        });
+        y += metric.lineHeight;
+      });
+      context.restore();
+    };
+    const drawBakedShape = (context: CanvasRenderingContext2D, shape: XlsxShape, rect: XlsxImageRect) => {
+      const fillColor = shape.fill?.none ? "transparent" : (shape.fill?.color ?? "transparent");
+      const strokeColor = shape.stroke?.none ? "transparent" : (shape.stroke?.color ?? "transparent");
+      const lineWidth = Math.max(0, (shape.stroke?.widthPx ?? (shape.geometry === "line" ? 2 : 1)) * zoomFactor);
+      const vectorShape = resolveShapeVector(shape);
+      const opacity = Math.min(shape.fill?.opacity ?? 1, shape.stroke?.opacity ?? 1);
+
+      context.save();
+      context.translate(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      if (shape.rotationDeg) {
+        context.rotate((shape.rotationDeg * Math.PI) / 180);
+      }
+      context.scale(shape.flipH ? -1 : 1, shape.flipV ? -1 : 1);
+      context.globalAlpha *= opacity;
+      context.lineWidth = lineWidth;
+      context.strokeStyle = strokeColor;
+      context.fillStyle = fillColor;
+      applyCanvasShapeDash(context, shape.stroke?.dash, lineWidth);
+
+      const localLeft = -rect.width / 2;
+      const localTop = -rect.height / 2;
+      if (vectorShape && typeof Path2D !== "undefined") {
+        context.save();
+        context.translate(localLeft, localTop);
+        context.scale(
+          rect.width / Math.max(1, vectorShape.viewBox.width),
+          rect.height / Math.max(1, vectorShape.viewBox.height)
+        );
+        const path = new Path2D(vectorShape.path);
+        if (fillColor !== "transparent") {
+          context.fill(path);
+        }
+        if (strokeColor !== "transparent" && lineWidth > 0) {
+          context.stroke(path);
+        }
+        context.restore();
+      } else if (shape.geometry === "ellipse") {
+        context.beginPath();
+        context.ellipse(0, 0, rect.width / 2, rect.height / 2, 0, 0, Math.PI * 2);
+        if (fillColor !== "transparent") {
+          context.fill();
+        }
+        if (strokeColor !== "transparent" && lineWidth > 0) {
+          context.stroke();
+        }
+      } else {
+        const radius = shape.geometry === "roundRect" ? 12 * zoomFactor : 0;
+        drawCanvasRoundedRect(context, localLeft, localTop, rect.width, rect.height, radius);
+        if (fillColor !== "transparent") {
+          context.fill();
+        }
+        if (strokeColor !== "transparent" && lineWidth > 0) {
+          context.stroke();
+        }
+      }
+
+      drawBakedShapeText(context, shape, localLeft, localTop, rect.width, rect.height);
+      context.restore();
+    };
+    const drawBakedFormControl = (context: CanvasRenderingContext2D, control: XlsxFormControl, rect: XlsxImageRect) => {
+      const label = resolveFormControlLabel(control);
+      const stroke = paletteIsDark(palette) ? "#cbd5e1" : "#475569";
+      const textColor = control.textColor ?? "#000000";
+      const fontSizePx = Math.max(9 * zoomFactor, ((control.fontSizePt ?? 9) * 96 / 72) * zoomFactor);
+      const iconSize = Math.min(14 * zoomFactor, Math.max(0, rect.height - 4 * zoomFactor));
+      context.save();
+      context.font = `400 ${fontSizePx}px ${control.fontFamily ?? "Calibri, sans-serif"}`;
+      context.textBaseline = "middle";
+      context.fillStyle = textColor;
+      context.strokeStyle = stroke;
+      context.lineWidth = Math.max(1, zoomFactor);
+
+      if (control.kind === "group-box") {
+        const labelInset = label ? Math.max(7, fontSizePx * 0.5) : 0;
+        drawCanvasRoundedRect(context, rect.left, rect.top + labelInset, rect.width, Math.max(0, rect.height - labelInset), 2 * zoomFactor);
+        context.stroke();
+        if (label) {
+          context.fillStyle = SHEET_SURFACE;
+          const labelWidth = Math.min(rect.width - 16 * zoomFactor, context.measureText(label).width + 8 * zoomFactor);
+          context.fillRect(rect.left + 8 * zoomFactor, rect.top, labelWidth, fontSizePx * 1.2);
+          context.fillStyle = textColor;
+          context.textAlign = "left";
+          context.fillText(label, rect.left + 12 * zoomFactor, rect.top + fontSizePx * 0.55);
+        }
+        context.restore();
+        return;
+      }
+
+      if (control.kind === "button" || control.kind === "dropdown" || control.kind === "editbox" || control.kind === "listbox" || control.kind === "scrollbar" || control.kind === "spinner" || control.kind === "unknown") {
+        if (control.kind === "button") {
+          const gradient = context.createLinearGradient(rect.left, rect.top, rect.left, rect.top + rect.height);
+          gradient.addColorStop(0, "#f8fafc");
+          gradient.addColorStop(1, "#e2e8f0");
+          context.fillStyle = gradient;
+        } else {
+          context.fillStyle = "transparent";
+        }
+        drawCanvasRoundedRect(context, rect.left, rect.top, rect.width, rect.height, control.kind === "button" ? 4 * zoomFactor : 2 * zoomFactor);
+        if (control.kind === "button") {
+          context.fill();
+        }
+        context.stroke();
+      }
+
+      let textLeft = rect.left + 2 * zoomFactor;
+      const textRightInset = control.kind === "dropdown" ? 18 * zoomFactor : 6 * zoomFactor;
+      if (control.kind === "checkbox") {
+        context.strokeRect(rect.left + 2 * zoomFactor, rect.top + (rect.height - iconSize) / 2, iconSize, iconSize);
+        if (control.checked) {
+          context.fillStyle = paletteIsDark(palette) ? "#60a5fa" : "#2563eb";
+          context.fillRect(rect.left + 2 * zoomFactor + 1.5, rect.top + (rect.height - iconSize) / 2 + 1.5, Math.max(0, iconSize - 3), Math.max(0, iconSize - 3));
+          context.strokeStyle = paletteIsDark(palette) ? "#020617" : "#ffffff";
+          context.beginPath();
+          context.moveTo(rect.left + 2 * zoomFactor + iconSize * 0.24, rect.top + rect.height / 2 + iconSize * 0.06);
+          context.lineTo(rect.left + 2 * zoomFactor + iconSize * 0.45, rect.top + rect.height / 2 + iconSize * 0.26);
+          context.lineTo(rect.left + 2 * zoomFactor + iconSize * 0.8, rect.top + rect.height / 2 - iconSize * 0.2);
+          context.stroke();
+        }
+        textLeft += iconSize + 4 * zoomFactor;
+      } else if (control.kind === "radio") {
+        context.beginPath();
+        context.arc(rect.left + 2 * zoomFactor + iconSize / 2, rect.top + rect.height / 2, iconSize / 2, 0, Math.PI * 2);
+        context.stroke();
+        if (control.checked) {
+          context.fillStyle = paletteIsDark(palette) ? "#60a5fa" : "#2563eb";
+          context.beginPath();
+          context.arc(rect.left + 2 * zoomFactor + iconSize / 2, rect.top + rect.height / 2, iconSize * 0.25, 0, Math.PI * 2);
+          context.fill();
+        }
+        textLeft += iconSize + 4 * zoomFactor;
+      }
+
+      if (label) {
+        const maxTextWidth = Math.max(0, rect.left + rect.width - textLeft - textRightInset);
+        const text = truncateCanvasText(context, label, maxTextWidth);
+        context.fillStyle = textColor;
+        context.textAlign = control.textAlign === "right" ? "right" : control.textAlign === "center" ? "center" : "left";
+        const textX = context.textAlign === "right"
+          ? rect.left + rect.width - textRightInset
+          : context.textAlign === "center"
+            ? textLeft + maxTextWidth / 2
+            : textLeft;
+        context.fillText(text, textX, rect.top + rect.height / 2);
+      }
+      if (control.kind === "dropdown") {
+        context.fillStyle = textColor;
+        context.textAlign = "center";
+        context.fillText("▼", rect.left + rect.width - 10 * zoomFactor, rect.top + rect.height / 2);
+      }
+      context.restore();
+    };
+    const drawBakedCanvasDrawings = (
+      pane: FrozenDrawingPane,
+      context: CanvasRenderingContext2D,
+      dirtyRects: CanvasDirtyRect[]
+    ) => {
+      if (bakedCanvasDrawingEntries.length === 0 || dirtyRects.length === 0) {
+        return;
+      }
+
+      for (const entry of bakedCanvasDrawingEntries) {
+        if (resolveDrawingPane(entry.rect) !== pane) {
+          continue;
+        }
+        const localRect = resolveBakedCanvasLocalRect(entry.rect, pane);
+        if (
+          localRect.left + localRect.width < 0
+          || localRect.top + localRect.height < 0
+          || localRect.left > paneBounds[pane].width
+          || localRect.top > paneBounds[pane].height
+          || !intersectsCanvasDirtyRects(localRect.left, localRect.top, localRect.width, localRect.height, dirtyRects)
+        ) {
+          continue;
+        }
+
+        if (entry.kind === "shape") {
+          drawBakedShape(context, entry.shape, localRect);
+        } else if (entry.kind === "formControl") {
+          drawBakedFormControl(context, entry.control, localRect);
+        } else {
+          const imageElement = getCanvasImage(entry.image);
+          if (imageElement) {
+            context.drawImage(imageElement, localRect.left, localRect.top, localRect.width, localRect.height);
+          }
+        }
+      }
+    };
 
     const cellPaneOrder: FrozenDrawingPane[] = ["scroll", "top", "left", "corner"];
     if (shouldRepaintBody) {
@@ -10869,6 +11337,14 @@ function XlsxGrid({
           paneContext.restore();
         }
       }
+
+      for (const pane of cellPaneOrder) {
+        const paneContext = bodyContexts[pane];
+        if (!paneContext) {
+          continue;
+        }
+        drawBakedCanvasDrawings(pane, paneContext, bodyDirtyRectsByPane[pane]);
+      }
     }
 
     if (shouldRepaintHeaders && cornerContext) {
@@ -11051,6 +11527,10 @@ function XlsxGrid({
   }, [
     activeSheet,
     applyCanvasViewportCompensation,
+    bakedCanvasDrawingSignature,
+    bakedFormControlRects,
+    bakedImageRects,
+    bakedShapeRects,
     canvasColumnHeaderCells,
     canvasPaneAxisItems,
     canvasRowHeaderCells,
@@ -11071,6 +11551,7 @@ function XlsxGrid({
     frozenPaneBottom,
     frozenPaneRight,
     getCellData,
+    getCanvasImage,
     getBodyBlitBufferCanvas,
     getHeaderBlitBufferCanvas,
     palette,
@@ -11080,6 +11561,7 @@ function XlsxGrid({
     rowIndexByActual,
     rowPrefixSums,
     selectionHeaderSurface,
+    shouldBakeCanvasStaticDrawings,
     stickyLeftByCol,
     stickyTopByRow,
     visibleCols,
@@ -12124,14 +12606,15 @@ function XlsxGrid({
     width: cornerBodyCanvasWidth,
     zIndex: 36
   };
+  const drawingViewportCacheSignature = `${Math.floor(drawingViewport.left / CANVAS_VIEWPORT_OVERSCAN_PX)}:${Math.floor(drawingViewport.top / CANVAS_VIEWPORT_OVERSCAN_PX)}:${drawingViewport.width}:${drawingViewport.height}`;
   const previousPaneDrawingNodes = paneDrawingNodesCacheRef.current;
   const canReusePaneDrawingNodes =
     previousPaneDrawingNodes !== null
     && previousPaneDrawingNodes.showImages === showImages
     && previousPaneDrawingNodes.chartRects === chartRects
-    && previousPaneDrawingNodes.formControlRects === formControlRects
-    && previousPaneDrawingNodes.shapeRects === shapeRects
-    && previousPaneDrawingNodes.imageRects === imageRects
+    && previousPaneDrawingNodes.formControlRects === domFormControlRects
+    && previousPaneDrawingNodes.shapeRects === domShapeRects
+    && previousPaneDrawingNodes.imageRects === domImageRects
     && previousPaneDrawingNodes.selectedChartId === selectedChartId
     && previousPaneDrawingNodes.selectedImageId === selectedImageId
     && previousPaneDrawingNodes.readOnly === readOnly
@@ -12141,10 +12624,7 @@ function XlsxGrid({
     && previousPaneDrawingNodes.renderImageSelection === renderImageSelection
     && previousPaneDrawingNodes.isChartsLoading === isChartsLoading
     && previousPaneDrawingNodes.palette === palette
-    && previousPaneDrawingNodes.drawingViewport.left === drawingViewport.left
-    && previousPaneDrawingNodes.drawingViewport.top === drawingViewport.top
-    && previousPaneDrawingNodes.drawingViewport.width === drawingViewport.width
-    && previousPaneDrawingNodes.drawingViewport.height === drawingViewport.height;
+    && previousPaneDrawingNodes.drawingViewportSignature === drawingViewportCacheSignature;
   const paneDrawingNodes = canReusePaneDrawingNodes
     ? previousPaneDrawingNodes.value
     : (!showImages
@@ -12158,33 +12638,33 @@ function XlsxGrid({
             corner: (
               <>
                 {chartRects.map(({ chart, rect }) => renderChartDrawing(chart, rect, "corner"))}
-                {shapeRects.map(({ shape, rect }) => renderShapeDrawing(shape, rect, "corner"))}
-                {formControlRects.map(({ control, rect }) => renderFormControlDrawing(control, rect, "corner"))}
-                {imageRects.map(({ image, rect }) => renderImageDrawing(image, rect, "corner"))}
+                {domShapeRects.map(({ shape, rect }) => renderShapeDrawing(shape, rect, "corner"))}
+                {domFormControlRects.map(({ control, rect }) => renderFormControlDrawing(control, rect, "corner"))}
+                {domImageRects.map(({ image, rect }) => renderImageDrawing(image, rect, "corner"))}
               </>
             ),
             left: (
               <>
                 {chartRects.map(({ chart, rect }) => renderChartDrawing(chart, rect, "left"))}
-                {shapeRects.map(({ shape, rect }) => renderShapeDrawing(shape, rect, "left"))}
-                {formControlRects.map(({ control, rect }) => renderFormControlDrawing(control, rect, "left"))}
-                {imageRects.map(({ image, rect }) => renderImageDrawing(image, rect, "left"))}
+                {domShapeRects.map(({ shape, rect }) => renderShapeDrawing(shape, rect, "left"))}
+                {domFormControlRects.map(({ control, rect }) => renderFormControlDrawing(control, rect, "left"))}
+                {domImageRects.map(({ image, rect }) => renderImageDrawing(image, rect, "left"))}
               </>
             ),
             scroll: (
               <>
                 {chartRects.map(({ chart, rect }) => renderChartDrawing(chart, rect, "scroll"))}
-                {shapeRects.map(({ shape, rect }) => renderShapeDrawing(shape, rect, "scroll"))}
-                {formControlRects.map(({ control, rect }) => renderFormControlDrawing(control, rect, "scroll"))}
-                {imageRects.map(({ image, rect }) => renderImageDrawing(image, rect, "scroll"))}
+                {domShapeRects.map(({ shape, rect }) => renderShapeDrawing(shape, rect, "scroll"))}
+                {domFormControlRects.map(({ control, rect }) => renderFormControlDrawing(control, rect, "scroll"))}
+                {domImageRects.map(({ image, rect }) => renderImageDrawing(image, rect, "scroll"))}
               </>
             ),
             top: (
               <>
                 {chartRects.map(({ chart, rect }) => renderChartDrawing(chart, rect, "top"))}
-                {shapeRects.map(({ shape, rect }) => renderShapeDrawing(shape, rect, "top"))}
-                {formControlRects.map(({ control, rect }) => renderFormControlDrawing(control, rect, "top"))}
-                {imageRects.map(({ image, rect }) => renderImageDrawing(image, rect, "top"))}
+                {domShapeRects.map(({ shape, rect }) => renderShapeDrawing(shape, rect, "top"))}
+                {domFormControlRects.map(({ control, rect }) => renderFormControlDrawing(control, rect, "top"))}
+                {domImageRects.map(({ image, rect }) => renderImageDrawing(image, rect, "top"))}
               </>
             )
           }) satisfies Record<FrozenDrawingPane, React.ReactNode>;
@@ -12192,9 +12672,9 @@ function XlsxGrid({
   if (!canReusePaneDrawingNodes) {
     paneDrawingNodesCacheRef.current = {
       chartRects,
-      drawingViewport,
-      formControlRects,
-      imageRects,
+      drawingViewportSignature: drawingViewportCacheSignature,
+      formControlRects: domFormControlRects,
+      imageRects: domImageRects,
       isChartsLoading,
       palette,
       readOnly,
@@ -12204,7 +12684,7 @@ function XlsxGrid({
       selectedChartId,
       selectedImageId,
       selectionStroke,
-      shapeRects,
+      shapeRects: domShapeRects,
       showImages,
       value: paneDrawingNodes
     };
