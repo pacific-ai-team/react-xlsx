@@ -77,12 +77,12 @@ jobs:
         working-directory: packages/react-xlsx
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access restricted
+        run: npm publish --access public
 
       - name: Publish with npm trusted publishing
         if: steps.state.outputs.already_published != 'true' && env.NPM_TOKEN == ''
         working-directory: packages/react-xlsx
-        run: npm publish --access restricted
+        run: npm publish --access public
 
       - name: Push release tag
         if: steps.state.outputs.already_published != 'true'
