@@ -14419,11 +14419,13 @@ function XlsxViewerInner({
               flex: "1 1 auto",
               flexDirection: "column",
               inlineSize: "100%",
+              isolation: "isolate",
               maxHeight: "100%",
               maxWidth: "100%",
               minHeight: 0,
               minWidth: 0,
               overflow: "hidden",
+              position: "relative",
               width: "100%"
             }}
           >
