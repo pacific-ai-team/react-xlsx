@@ -1,7 +1,21 @@
 {
   "name": "@extend-ai/react-xlsx",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "description": "React components and hooks for viewing XLSX workbooks",
+  "keywords": [
+    "react",
+    "xlsx",
+    "excel",
+    "spreadsheet",
+    "workbook",
+    "worksheet",
+    "viewer",
+    "xlsx-viewer",
+    "excel-viewer",
+    "spreadsheet-viewer",
+    "charts",
+    "tables"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/extend-hq/react-xlsx.git"
