@@ -1221,18 +1221,22 @@ function rangesEqual(left: XlsxCellRange | null, right: XlsxCellRange | null) {
   );
 }
 
-function isPrintableKey(event: React.KeyboardEvent) {
+function isPrintableKey(event: Pick<KeyboardEvent, "altKey" | "ctrlKey" | "key" | "metaKey">) {
   return event.key.length === 1 && !event.altKey && !event.ctrlKey && !event.metaKey;
 }
 
-function isInteractiveFocusTarget(target: EventTarget | null, container: HTMLElement) {
+function getInteractiveFocusTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) {
-    return false;
+    return null;
   }
 
-  const interactiveElement = target.closest(
+  return target.closest(
     "a[href], button, input, select, textarea, [contenteditable=''], [contenteditable='true'], [role='button'], [role='menu'], [role='menuitem'], [role='textbox'], [tabindex]:not([tabindex='-1'])"
   );
+}
+
+function isInteractiveFocusTarget(target: EventTarget | null, container: HTMLElement) {
+  const interactiveElement = getInteractiveFocusTarget(target);
   return Boolean(interactiveElement && interactiveElement !== container && container.contains(interactiveElement));
 }
 
@@ -5913,8 +5917,10 @@ type GridRowProps = {
   onCellDoubleClick: (cell: XlsxCellAddress) => void;
   onCellClick: (cell: XlsxCellAddress, cellData: CellRenderData) => void;
   onCellPointerDown: (event: React.PointerEvent<HTMLTableCellElement>, cell: XlsxCellAddress) => void;
+  onEditingBlur: () => void;
   onEditingCancel: () => void;
   onEditingCommit: () => void;
+  onEditingNavigate: (key: string, value: string) => void;
   onEditingValueChange: (value: string) => void;
   onRowHeaderRef: (actualRow: number, element: HTMLTableCellElement | null) => void;
   onRowPointerDown: (event: React.PointerEvent<HTMLTableCellElement>, actualRow: number) => void;
@@ -5943,8 +5949,10 @@ function GridRow({
   onCellClick,
   onCellDoubleClick,
   onCellPointerDown,
+  onEditingBlur,
   onEditingCancel,
   onEditingCommit,
+  onEditingNavigate,
   onEditingValueChange,
   onRowHeaderRef,
   onRowPointerDown,
@@ -6233,7 +6241,7 @@ function GridRow({
             {isEditing ? (
               <input
                 autoFocus
-                onBlur={onEditingCommit}
+                onBlur={onEditingBlur}
                 onChange={(event) => onEditingValueChange(event.target.value)}
                 onKeyDown={(event) => {
                   event.stopPropagation();
@@ -6246,6 +6254,17 @@ function GridRow({
                   if (event.key === "Escape") {
                     event.preventDefault();
                     onEditingCancel();
+                    return;
+                  }
+
+                  if (
+                    event.key === "ArrowDown" ||
+                    event.key === "ArrowLeft" ||
+                    event.key === "ArrowRight" ||
+                    event.key === "ArrowUp"
+                  ) {
+                    event.preventDefault();
+                    onEditingNavigate(event.key, event.currentTarget.value);
                   }
                 }}
                 style={{
@@ -6341,8 +6360,10 @@ const MemoGridRow = React.memo(GridRow, (prev, next) => {
     prev.onCellClick !== next.onCellClick ||
     prev.onCellDoubleClick !== next.onCellDoubleClick ||
     prev.onCellPointerDown !== next.onCellPointerDown ||
+    prev.onEditingBlur !== next.onEditingBlur ||
     prev.onEditingCancel !== next.onEditingCancel ||
     prev.onEditingCommit !== next.onEditingCommit ||
+    prev.onEditingNavigate !== next.onEditingNavigate ||
     prev.onEditingValueChange !== next.onEditingValueChange ||
     prev.onRowHeaderRef !== next.onRowHeaderRef ||
     prev.onRowPointerDown !== next.onRowPointerDown ||
@@ -6463,6 +6484,13 @@ function XlsxGrid({
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const wrapperRef = React.useRef<HTMLDivElement>(null);
   const tableRef = React.useRef<HTMLTableElement>(null);
+  const gridKeyboardActiveRef = React.useRef(false);
+  const gridKeyboardHandlerRef = React.useRef<((event: KeyboardEvent) => void) | null>(null);
+  const axisSelectionRef = React.useRef<
+    | { axis: "column"; endCol: number; startCol: number }
+    | { axis: "row"; endRow: number; startRow: number }
+    | null
+  >(null);
   const scrollBodyCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const topBodyCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const leftBodyCanvasRef = React.useRef<HTMLCanvasElement>(null);
@@ -8494,9 +8522,58 @@ function XlsxGrid({
     setInteractionMode("idle");
   }, [activeSheetIndex, clearGlobalCursor, revision]);
 
-  const focusGrid = React.useCallback((options?: FocusOptions) => {
-    scrollRef.current?.focus(options);
+  const focusGridElement = React.useCallback((element: HTMLDivElement, options?: FocusOptions) => {
+    if (document.activeElement !== element) {
+      element.focus(options ?? { preventScroll: true });
+    }
   }, []);
+
+  const focusGrid = React.useCallback((options?: FocusOptions) => {
+    const scroller = scrollRef.current;
+    if (scroller) {
+      gridKeyboardActiveRef.current = true;
+      focusGridElement(scroller, options);
+    }
+  }, [focusGridElement]);
+
+  React.useEffect(() => {
+    const handleDocumentPointerDown = (event: PointerEvent) => {
+      const scroller = scrollRef.current;
+      if (!scroller || !(event.target instanceof Node) || !scroller.contains(event.target)) {
+        gridKeyboardActiveRef.current = false;
+        return;
+      }
+
+      if (isInteractiveFocusTarget(event.target, scroller)) {
+        gridKeyboardActiveRef.current = false;
+        return;
+      }
+
+      gridKeyboardActiveRef.current = true;
+      focusGridElement(scroller);
+    };
+
+    const handleDocumentKeyDown = (event: KeyboardEvent) => {
+      if (!gridKeyboardActiveRef.current || event.defaultPrevented) {
+        return;
+      }
+
+      const scroller = scrollRef.current;
+      const interactiveTarget = getInteractiveFocusTarget(event.target);
+      if (!scroller || (interactiveTarget && interactiveTarget !== scroller)) {
+        return;
+      }
+
+      gridKeyboardHandlerRef.current?.(event);
+    };
+
+    document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+    document.addEventListener("keydown", handleDocumentKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+      document.removeEventListener("keydown", handleDocumentKeyDown);
+    };
+  }, [focusGridElement]);
 
   const openHyperlink = React.useCallback((target?: string | null, location?: string | null) => {
     const internalTarget = parseInternalSheetLink(location ?? target);
@@ -8541,6 +8618,7 @@ function XlsxGrid({
     }
 
     if (readOnly) {
+      editingCellRef.current = null;
       setEditingCell(null);
       setEditingValue("");
       focusGrid();
@@ -8548,16 +8626,74 @@ function XlsxGrid({
     }
 
     setCellValue(editingCell, editingValue);
+    editingCellRef.current = null;
     setEditingCell(null);
     setEditingValue("");
     focusGrid();
   }, [editingCell, editingValue, focusGrid, readOnly, setCellValue]);
 
   const cancelEditing = React.useCallback(() => {
+    editingCellRef.current = null;
     setEditingCell(null);
     setEditingValue("");
     focusGrid();
   }, [focusGrid]);
+
+  const handleEditingBlur = React.useCallback(() => {
+    if (!editingCellRef.current) {
+      return;
+    }
+
+    commitEditing();
+  }, [commitEditing]);
+
+  const handleEditingNavigate = React.useCallback((key: string, value: string) => {
+    const cell = editingCellRef.current;
+    if (!cell) {
+      return;
+    }
+
+    const currentRowIndex = rowIndexByActual.get(cell.row);
+    const currentColIndex = colIndexByActual.get(cell.col);
+    if (currentRowIndex === undefined || currentColIndex === undefined) {
+      if (!readOnlyRef.current) {
+        setCellValue(cell, value);
+      }
+      editingCellRef.current = null;
+      setEditingCell(null);
+      setEditingValue("");
+      focusGrid();
+      return;
+    }
+
+    let nextRowIndex = currentRowIndex;
+    let nextColIndex = currentColIndex;
+    switch (key) {
+      case "ArrowDown":
+        nextRowIndex += 1;
+        break;
+      case "ArrowLeft":
+        nextColIndex -= 1;
+        break;
+      case "ArrowRight":
+        nextColIndex += 1;
+        break;
+      case "ArrowUp":
+        nextRowIndex -= 1;
+        break;
+      default:
+        return;
+    }
+
+    if (!readOnlyRef.current) {
+      setCellValue(cell, value);
+    }
+    editingCellRef.current = null;
+    setEditingCell(null);
+    setEditingValue("");
+    moveSelection(nextRowIndex, nextColIndex, false);
+    focusGrid();
+  }, [colIndexByActual, focusGrid, rowIndexByActual, setCellValue, visibleCols, visibleRows]);
 
   React.useEffect(() => {
     commitEditingRef.current = commitEditing;
@@ -9753,6 +9889,7 @@ function XlsxGrid({
   }, [getCellData, resolveOverlayRect, zoomFactor]);
 
   const commitSelectionRange = React.useCallback((range: XlsxCellRange) => {
+    gridKeyboardActiveRef.current = true;
     const normalized = normalizeRange(range);
     if (
       selectionRef.current &&
@@ -10124,6 +10261,23 @@ function XlsxGrid({
       if (nextRange && (dragState?.didDrag || !dragState?.committedOnPointerDown)) {
         selectionPreviewRangeRef.current = nextRange;
         displayedSelectionRef.current = nextRange;
+        if (dragState?.axis === "column") {
+          const normalized = normalizeRange(nextRange);
+          axisSelectionRef.current = {
+            axis: "column",
+            startCol: normalized.start.col,
+            endCol: normalized.end.col
+          };
+        } else if (dragState?.axis === "row") {
+          const normalized = normalizeRange(nextRange);
+          axisSelectionRef.current = {
+            axis: "row",
+            startRow: normalized.start.row,
+            endRow: normalized.end.row
+          };
+        } else {
+          axisSelectionRef.current = null;
+        }
         commitSelectionRange(nextRange);
       } else if (!nextRange) {
         selectionPreviewRangeRef.current = null;
@@ -10261,6 +10415,7 @@ function XlsxGrid({
 
     event.preventDefault();
     focusGrid();
+    axisSelectionRef.current = null;
     const targetCell =
       event.currentTarget.colSpan > 1 || event.currentTarget.rowSpan > 1
         ? resolvePointerCellFromGeometry(event.clientX, event.clientY) ?? cell
@@ -10352,6 +10507,7 @@ function XlsxGrid({
       event.clientX,
       event.clientY
     );
+    axisSelectionRef.current = { axis: "row", startRow: anchorRow, endRow: actualRow };
     commitSelectionRange(initialRange);
   }, [commitSelectionRange, firstVisibleCol, focusGrid, lastVisibleCol, resolveRowPointerOrigin]);
 
@@ -10390,6 +10546,7 @@ function XlsxGrid({
       event.clientX,
       event.clientY
     );
+    axisSelectionRef.current = { axis: "column", startCol: anchorCol, endCol: actualCol };
     commitSelectionRange(initialRange);
   }, [commitSelectionRange, firstVisibleRow, focusGrid, lastVisibleRow, resolveColumnPointerOrigin]);
 
@@ -10688,6 +10845,7 @@ function XlsxGrid({
 
     event.preventDefault();
     focusGrid();
+    axisSelectionRef.current = null;
     const currentSelection = selectionRef.current;
     const anchor = event.shiftKey && currentSelection ? currentSelection.start : cell;
     const initialRange = normalizeRange({ start: anchor, end: cell });
@@ -10808,6 +10966,7 @@ function XlsxGrid({
       event.clientX,
       event.clientY
     );
+    axisSelectionRef.current = { axis: "column", startCol: anchorCol, endCol: actualCol };
     commitSelectionRange(initialRange);
   }, [
     colIndexByActual,
@@ -10871,6 +11030,7 @@ function XlsxGrid({
       event.clientX,
       event.clientY
     );
+    axisSelectionRef.current = { axis: "row", startRow: anchorRow, endRow: actualRow };
     commitSelectionRange(initialRange);
   }, [
     colPrefixSums,
@@ -13896,6 +14056,11 @@ function XlsxGrid({
       return;
     }
 
+    const nextRange = { start: { row: nextRow, col: nextCol }, end: { row: nextRow, col: nextCol } };
+    axisSelectionRef.current = null;
+    selectionPreviewRangeRef.current = null;
+    displayedSelectionRef.current = nextRange;
+    applyPreviewOverlay(nextRange);
     selectCell({ row: nextRow, col: nextCol }, extend ? { extend: true } : undefined);
     ensureCellVisible(clampedRowIndex, clampedColIndex);
   }
@@ -13925,6 +14090,251 @@ function XlsxGrid({
       : currentOffset - viewportWidth;
     return Math.max(0, Math.min(findIndexForOffsetPrefix(colPrefixSums, targetOffset), visibleCols.length - 1));
   }
+
+  function resolveColumnSelectionNavigation(eventKey: string) {
+    const axisSelection = axisSelectionRef.current;
+    if (axisSelection?.axis !== "column" || firstVisibleRow === undefined) {
+      return null;
+    }
+
+    const startCol = Math.min(axisSelection.startCol, axisSelection.endCol);
+    const endCol = Math.max(axisSelection.startCol, axisSelection.endCol);
+    const targetCol = eventKey === "ArrowLeft"
+      ? startCol - 1
+      : eventKey === "ArrowRight"
+        ? endCol + 1
+        : null;
+    if (targetCol === null) {
+      return null;
+    }
+
+    const rowIndex = rowIndexByActual.get(firstVisibleRow);
+    const colIndex = colIndexByActual.get(targetCol);
+    if (rowIndex === undefined || colIndex === undefined) {
+      return null;
+    }
+
+    return { colIndex, rowIndex };
+  }
+
+  function resolveRowSelectionNavigation(eventKey: string) {
+    const axisSelection = axisSelectionRef.current;
+    if (axisSelection?.axis !== "row" || firstVisibleCol === undefined) {
+      return null;
+    }
+
+    const startRow = Math.min(axisSelection.startRow, axisSelection.endRow);
+    const endRow = Math.max(axisSelection.startRow, axisSelection.endRow);
+    const targetRow = eventKey === "ArrowUp"
+      ? startRow - 1
+      : eventKey === "ArrowDown"
+        ? endRow + 1
+        : null;
+    if (targetRow === null) {
+      return null;
+    }
+
+    const rowIndex = rowIndexByActual.get(targetRow);
+    const colIndex = colIndexByActual.get(firstVisibleCol);
+    if (rowIndex === undefined || colIndex === undefined) {
+      return null;
+    }
+
+    return { colIndex, rowIndex };
+  }
+
+  function handleGridKeyDown(event: React.KeyboardEvent<HTMLDivElement> | KeyboardEvent) {
+    if (editingCell) {
+      return;
+    }
+
+    if (!readOnly && (event.metaKey || event.ctrlKey) && !event.altKey) {
+      const normalizedKey = event.key.toLowerCase();
+      if (normalizedKey === "z" && event.shiftKey) {
+        event.preventDefault();
+        redo();
+        return;
+      }
+
+      if (normalizedKey === "z") {
+        event.preventDefault();
+        undo();
+        return;
+      }
+
+      if (normalizedKey === "y") {
+        event.preventDefault();
+        redo();
+        return;
+      }
+    }
+
+    const currentCell = resolveCurrentCell();
+    if (!currentCell) {
+      return;
+    }
+
+    const currentRowIndex = rowIndexByActual.get(currentCell.row) ?? 0;
+    const currentColIndex = colIndexByActual.get(currentCell.col) ?? 0;
+    const isCommandNavigation = event.ctrlKey || event.metaKey;
+
+    if (!readOnly && isPrintableKey(event)) {
+      event.preventDefault();
+      startEditing(currentCell, event.key);
+      return;
+    }
+
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        if (!event.shiftKey && !isCommandNavigation) {
+          const target = resolveRowSelectionNavigation(event.key);
+          if (target) {
+            moveSelection(target.rowIndex, target.colIndex, false);
+            break;
+          }
+        }
+        moveSelection(
+          isCommandNavigation
+            ? (rowIndexByActual.get(resolveLastUsedVisibleIndex(visibleRows, activeSheet?.maxUsedRow ?? -1)) ?? visibleRows.length - 1)
+            : currentRowIndex + 1,
+          currentColIndex,
+          event.shiftKey
+        );
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        if (!event.shiftKey && !isCommandNavigation) {
+          const target = resolveRowSelectionNavigation(event.key);
+          if (target) {
+            moveSelection(target.rowIndex, target.colIndex, false);
+            break;
+          }
+        }
+        moveSelection(
+          isCommandNavigation
+            ? (rowIndexByActual.get(resolveFirstUsedVisibleIndex(visibleRows, activeSheet?.minUsedRow ?? -1)) ?? 0)
+            : currentRowIndex - 1,
+          currentColIndex,
+          event.shiftKey
+        );
+        break;
+      case "ArrowLeft":
+        event.preventDefault();
+        if (!event.shiftKey && !isCommandNavigation) {
+          const target = resolveColumnSelectionNavigation(event.key);
+          if (target) {
+            moveSelection(target.rowIndex, target.colIndex, false);
+            break;
+          }
+        }
+        moveSelection(
+          currentRowIndex,
+          isCommandNavigation
+            ? (colIndexByActual.get(resolveFirstUsedVisibleIndex(visibleCols, activeSheet?.minUsedCol ?? -1)) ?? 0)
+            : currentColIndex - 1,
+          event.shiftKey
+        );
+        break;
+      case "ArrowRight":
+        event.preventDefault();
+        if (!event.shiftKey && !isCommandNavigation) {
+          const target = resolveColumnSelectionNavigation(event.key);
+          if (target) {
+            moveSelection(target.rowIndex, target.colIndex, false);
+            break;
+          }
+        }
+        moveSelection(
+          currentRowIndex,
+          isCommandNavigation
+            ? (colIndexByActual.get(resolveLastUsedVisibleIndex(visibleCols, activeSheet?.maxUsedCol ?? -1)) ?? visibleCols.length - 1)
+            : currentColIndex + 1,
+          event.shiftKey
+        );
+        break;
+      case "Home":
+        event.preventDefault();
+        moveSelection(
+          isCommandNavigation
+            ? (rowIndexByActual.get(resolveFirstUsedVisibleIndex(visibleRows, activeSheet?.minUsedRow ?? -1)) ?? 0)
+            : currentRowIndex,
+          colIndexByActual.get(resolveFirstUsedVisibleIndex(visibleCols, activeSheet?.minUsedCol ?? -1)) ?? 0,
+          event.shiftKey
+        );
+        break;
+      case "End":
+        event.preventDefault();
+        moveSelection(
+          isCommandNavigation
+            ? (rowIndexByActual.get(resolveLastUsedVisibleIndex(visibleRows, activeSheet?.maxUsedRow ?? -1)) ?? visibleRows.length - 1)
+            : currentRowIndex,
+          colIndexByActual.get(resolveLastUsedVisibleIndex(visibleCols, activeSheet?.maxUsedCol ?? -1)) ?? visibleCols.length - 1,
+          event.shiftKey
+        );
+        break;
+      case "PageDown":
+        event.preventDefault();
+        if (event.altKey) {
+          moveSelection(currentRowIndex, resolvePageColIndex(currentColIndex, 1), event.shiftKey);
+          break;
+        }
+        moveSelection(resolvePageRowIndex(currentRowIndex, 1), currentColIndex, event.shiftKey);
+        break;
+      case "PageUp":
+        event.preventDefault();
+        if (event.altKey) {
+          moveSelection(currentRowIndex, resolvePageColIndex(currentColIndex, -1), event.shiftKey);
+          break;
+        }
+        moveSelection(resolvePageRowIndex(currentRowIndex, -1), currentColIndex, event.shiftKey);
+        break;
+      case "Tab":
+        event.preventDefault();
+        if (event.shiftKey) {
+          moveSelection(
+            currentColIndex > 0 ? currentRowIndex : currentRowIndex - 1,
+            currentColIndex > 0 ? currentColIndex - 1 : visibleCols.length - 1,
+            false
+          );
+        } else {
+          moveSelection(
+            currentColIndex < visibleCols.length - 1 ? currentRowIndex : currentRowIndex + 1,
+            currentColIndex < visibleCols.length - 1 ? currentColIndex + 1 : 0,
+            false
+          );
+        }
+        break;
+      case "Enter":
+        event.preventDefault();
+        if (event.metaKey || event.ctrlKey || event.altKey) {
+          break;
+        }
+        if (event.shiftKey) {
+          moveSelection(currentRowIndex - 1, currentColIndex, false);
+          break;
+        }
+        moveSelection(currentRowIndex + 1, currentColIndex, false);
+        break;
+      case "Backspace":
+      case "Delete":
+        if (!readOnly) {
+          event.preventDefault();
+          clearSelectedCells();
+        }
+        break;
+      case "F2":
+        if (!readOnly) {
+          event.preventDefault();
+          startEditing(currentCell);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  gridKeyboardHandlerRef.current = handleGridKeyDown;
 
   const scrollerViewportProps: XlsxScrollerRenderProps["viewportProps"] = {
     key: activeTabIndex,
@@ -13965,172 +14375,21 @@ function XlsxGrid({
         return;
       }
 
-      if (document.activeElement !== event.currentTarget) {
-        event.currentTarget.focus({ preventScroll: true });
-      }
+      gridKeyboardActiveRef.current = true;
+      focusGridElement(event.currentTarget);
     },
-    onKeyDown: (event) => {
-      if (editingCell) {
+    onClickCapture: (event) => {
+      if (isInteractiveFocusTarget(event.target, event.currentTarget)) {
         return;
       }
 
-      if (!readOnly && (event.metaKey || event.ctrlKey) && !event.altKey) {
-        const normalizedKey = event.key.toLowerCase();
-        if (normalizedKey === "z" && event.shiftKey) {
-          event.preventDefault();
-          redo();
-          return;
-        }
-
-        if (normalizedKey === "z") {
-          event.preventDefault();
-          undo();
-          return;
-        }
-
-        if (normalizedKey === "y") {
-          event.preventDefault();
-          redo();
-          return;
-        }
-      }
-
-      const currentCell = resolveCurrentCell();
-      if (!currentCell) {
-        return;
-      }
-
-      const currentRowIndex = rowIndexByActual.get(currentCell.row) ?? 0;
-      const currentColIndex = colIndexByActual.get(currentCell.col) ?? 0;
-      const isCommandNavigation = event.ctrlKey || event.metaKey;
-
-      if (!readOnly && isPrintableKey(event)) {
-        event.preventDefault();
-        startEditing(currentCell, event.key);
-        return;
-      }
-
-      switch (event.key) {
-        case "ArrowDown":
-          event.preventDefault();
-          moveSelection(
-            isCommandNavigation
-              ? (rowIndexByActual.get(resolveLastUsedVisibleIndex(visibleRows, activeSheet?.maxUsedRow ?? -1)) ?? visibleRows.length - 1)
-              : currentRowIndex + 1,
-            currentColIndex,
-            event.shiftKey
-          );
-          break;
-        case "ArrowUp":
-          event.preventDefault();
-          moveSelection(
-            isCommandNavigation
-              ? (rowIndexByActual.get(resolveFirstUsedVisibleIndex(visibleRows, activeSheet?.minUsedRow ?? -1)) ?? 0)
-              : currentRowIndex - 1,
-            currentColIndex,
-            event.shiftKey
-          );
-          break;
-        case "ArrowLeft":
-          event.preventDefault();
-          moveSelection(
-            currentRowIndex,
-            isCommandNavigation
-              ? (colIndexByActual.get(resolveFirstUsedVisibleIndex(visibleCols, activeSheet?.minUsedCol ?? -1)) ?? 0)
-              : currentColIndex - 1,
-            event.shiftKey
-          );
-          break;
-        case "ArrowRight":
-          event.preventDefault();
-          moveSelection(
-            currentRowIndex,
-            isCommandNavigation
-              ? (colIndexByActual.get(resolveLastUsedVisibleIndex(visibleCols, activeSheet?.maxUsedCol ?? -1)) ?? visibleCols.length - 1)
-              : currentColIndex + 1,
-            event.shiftKey
-          );
-          break;
-        case "Home":
-          event.preventDefault();
-          moveSelection(
-            isCommandNavigation
-              ? (rowIndexByActual.get(resolveFirstUsedVisibleIndex(visibleRows, activeSheet?.minUsedRow ?? -1)) ?? 0)
-              : currentRowIndex,
-            colIndexByActual.get(resolveFirstUsedVisibleIndex(visibleCols, activeSheet?.minUsedCol ?? -1)) ?? 0,
-            event.shiftKey
-          );
-          break;
-        case "End":
-          event.preventDefault();
-          moveSelection(
-            isCommandNavigation
-              ? (rowIndexByActual.get(resolveLastUsedVisibleIndex(visibleRows, activeSheet?.maxUsedRow ?? -1)) ?? visibleRows.length - 1)
-              : currentRowIndex,
-            colIndexByActual.get(resolveLastUsedVisibleIndex(visibleCols, activeSheet?.maxUsedCol ?? -1)) ?? visibleCols.length - 1,
-            event.shiftKey
-          );
-          break;
-        case "PageDown":
-          event.preventDefault();
-          if (event.altKey) {
-            moveSelection(currentRowIndex, resolvePageColIndex(currentColIndex, 1), event.shiftKey);
-            break;
-          }
-          moveSelection(resolvePageRowIndex(currentRowIndex, 1), currentColIndex, event.shiftKey);
-          break;
-        case "PageUp":
-          event.preventDefault();
-          if (event.altKey) {
-            moveSelection(currentRowIndex, resolvePageColIndex(currentColIndex, -1), event.shiftKey);
-            break;
-          }
-          moveSelection(resolvePageRowIndex(currentRowIndex, -1), currentColIndex, event.shiftKey);
-          break;
-        case "Tab":
-          event.preventDefault();
-          if (event.shiftKey) {
-            moveSelection(
-              currentColIndex > 0 ? currentRowIndex : currentRowIndex - 1,
-              currentColIndex > 0 ? currentColIndex - 1 : visibleCols.length - 1,
-              false
-            );
-          } else {
-            moveSelection(
-              currentColIndex < visibleCols.length - 1 ? currentRowIndex : currentRowIndex + 1,
-              currentColIndex < visibleCols.length - 1 ? currentColIndex + 1 : 0,
-              false
-            );
-          }
-          break;
-        case "Enter":
-          event.preventDefault();
-          if (event.metaKey || event.ctrlKey || event.altKey) {
-            break;
-          }
-          if (event.shiftKey) {
-            moveSelection(currentRowIndex - 1, currentColIndex, false);
-            break;
-          }
-          moveSelection(currentRowIndex + 1, currentColIndex, false);
-          break;
-        case "Backspace":
-        case "Delete":
-          if (!readOnly) {
-            event.preventDefault();
-            clearSelectedCells();
-          }
-          break;
-        case "F2":
-          if (!readOnly) {
-            event.preventDefault();
-            startEditing(currentCell);
-          }
-          break;
-        default:
-          break;
-      }
+      gridKeyboardActiveRef.current = true;
+      focusGridElement(event.currentTarget);
     },
+    onFocus: () => {
+      gridKeyboardActiveRef.current = true;
+    },
+    onKeyDown: handleGridKeyDown,
     onPaste: (event) => {
       if (editingCell || readOnly) {
         return;
@@ -14370,7 +14629,7 @@ function XlsxGrid({
                     <input
                       ref={editingInputRef}
                       autoFocus
-                      onBlur={commitEditing}
+                      onBlur={handleEditingBlur}
                       onChange={(event) => setEditingValue(event.target.value)}
                       onKeyDown={(event) => {
                         event.stopPropagation();
@@ -14383,6 +14642,17 @@ function XlsxGrid({
                         if (event.key === "Escape") {
                           event.preventDefault();
                           cancelEditing();
+                          return;
+                        }
+
+                        if (
+                          event.key === "ArrowDown" ||
+                          event.key === "ArrowLeft" ||
+                          event.key === "ArrowRight" ||
+                          event.key === "ArrowUp"
+                        ) {
+                          event.preventDefault();
+                          handleEditingNavigate(event.key, event.currentTarget.value);
                         }
                       }}
                       style={{
@@ -14542,8 +14812,10 @@ function XlsxGrid({
                           onCellClick={handleCellClick}
                           onCellDoubleClick={handleCellDoubleClick}
                           onCellPointerDown={handleCellPointerDown}
+                          onEditingBlur={handleEditingBlur}
                           onEditingCancel={cancelEditing}
                           onEditingCommit={commitEditing}
+                          onEditingNavigate={handleEditingNavigate}
                           onEditingValueChange={setEditingValue}
                           headerLabelLiveScale={headerLabelLiveScale}
                           onRowHeaderRef={setRowHeaderRef}

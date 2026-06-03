@@ -9,6 +9,8 @@ pnpm-debug.log*
 *.local
 coverage/
 .playwright-cli/
+.playwright-mcp/
+xlsx-column*.png
 output/
 tmp/
 hs_err_pid*.log
