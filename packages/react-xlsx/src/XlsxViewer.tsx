@@ -25,6 +25,7 @@ import type {
   XlsxImageRenderProps,
   XlsxImageResizeHandlePosition,
   XlsxImageSelectionRenderProps,
+  XlsxScrollerRenderProps,
   XlsxShape,
   XlsxSheetData,
   XlsxSheetThumbnail,
@@ -6349,6 +6350,7 @@ function XlsxGrid({
   renderImage,
   renderImageSelection,
   renderTableHeaderMenu,
+  renderScroller,
   enableGestureZoom = true,
   experimentalCanvas = true,
   selectionColor,
@@ -6357,7 +6359,7 @@ function XlsxGrid({
   showImages = true
 }: Pick<
   XlsxViewerProps,
-  "allowResizeInReadOnly" | "emptyState" | "enableCanvasSelectionAnimation" | "enableGestureZoom" | "errorState" | "experimentalCanvas" | "fileTooLargeState" | "loadingComponent" | "loadingState" | "renderChartLoading" | "renderImage" | "renderImageSelection" | "renderTableHeaderMenu" | "selectionColor" | "selectionFillColor" | "selectionHeaderColor" | "showImages"
+  "allowResizeInReadOnly" | "emptyState" | "enableCanvasSelectionAnimation" | "enableGestureZoom" | "errorState" | "experimentalCanvas" | "fileTooLargeState" | "loadingComponent" | "loadingState" | "renderChartLoading" | "renderImage" | "renderImageSelection" | "renderScroller" | "renderTableHeaderMenu" | "selectionColor" | "selectionFillColor" | "selectionHeaderColor" | "showImages"
 > & {
   controller: XlsxViewerController;
   palette: ViewerPalette;
@@ -13821,172 +13823,171 @@ function XlsxGrid({
     selectCell({ row: nextRow, col: nextCol }, extend ? { extend: true } : undefined);
   }
 
+  const scrollerViewportProps: XlsxScrollerRenderProps["viewportProps"] = {
+    key: activeTabIndex,
+    ref: scrollRef,
+    onScroll: handleScrollerScroll,
+    onCopy: (event) => {
+      if (editingCell) {
+        return;
+      }
 
-  return (
-    <div style={{ backgroundColor: palette.canvas, display: "flex", flex: 1, minHeight: 0, minWidth: 0 }}>
-      <div
-        key={activeTabIndex}
-        ref={scrollRef}
-        onScroll={handleScrollerScroll}
-        onCopy={(event) => {
-          if (editingCell) {
-            return;
-          }
+      const clipboard = event.clipboardData;
+      const clipboardData = getClipboardData();
+      if (!clipboardData) {
+        return;
+      }
 
-          const clipboard = event.clipboardData;
-          const clipboardData = getClipboardData();
-          if (!clipboardData) {
-            return;
-          }
+      event.preventDefault();
+      if (clipboard) {
+        clipboard.setData("text/plain", clipboardData.text);
+        clipboard.setData("text/html", clipboardData.html);
+        clipboard.setData(INTERNAL_CLIPBOARD_MIME, clipboardData.structured);
+        return;
+      }
 
+      void copySelectionToClipboard();
+    },
+    onKeyDown: (event) => {
+      if (editingCell) {
+        return;
+      }
+
+      if (!readOnly && (event.metaKey || event.ctrlKey) && !event.altKey) {
+        const normalizedKey = event.key.toLowerCase();
+        if (normalizedKey === "z" && event.shiftKey) {
           event.preventDefault();
-          if (clipboard) {
-            clipboard.setData("text/plain", clipboardData.text);
-            clipboard.setData("text/html", clipboardData.html);
-            clipboard.setData(INTERNAL_CLIPBOARD_MIME, clipboardData.structured);
-            return;
-          }
+          redo();
+          return;
+        }
 
-          void copySelectionToClipboard();
-        }}
-        onKeyDown={(event) => {
-          if (editingCell) {
-            return;
-          }
-
-          if (!readOnly && (event.metaKey || event.ctrlKey) && !event.altKey) {
-            const normalizedKey = event.key.toLowerCase();
-            if (normalizedKey === "z" && event.shiftKey) {
-              event.preventDefault();
-              redo();
-              return;
-            }
-
-            if (normalizedKey === "z") {
-              event.preventDefault();
-              undo();
-              return;
-            }
-
-            if (normalizedKey === "y") {
-              event.preventDefault();
-              redo();
-              return;
-            }
-          }
-
-          const currentCell = resolveCurrentCell();
-          if (!currentCell) {
-            return;
-          }
-
-          const currentRowIndex = rowIndexByActual.get(currentCell.row) ?? 0;
-          const currentColIndex = colIndexByActual.get(currentCell.col) ?? 0;
-
-          if (!readOnly && isPrintableKey(event)) {
-            event.preventDefault();
-            startEditing(currentCell, event.key);
-            return;
-          }
-
-          switch (event.key) {
-            case "ArrowDown":
-              event.preventDefault();
-              moveSelection(Math.min(currentRowIndex + 1, visibleRows.length - 1), currentColIndex, event.shiftKey);
-              break;
-            case "ArrowUp":
-              event.preventDefault();
-              moveSelection(Math.max(currentRowIndex - 1, 0), currentColIndex, event.shiftKey);
-              break;
-            case "ArrowLeft":
-              event.preventDefault();
-              moveSelection(currentRowIndex, Math.max(currentColIndex - 1, 0), event.shiftKey);
-              break;
-            case "ArrowRight":
-              event.preventDefault();
-              moveSelection(currentRowIndex, Math.min(currentColIndex + 1, visibleCols.length - 1), event.shiftKey);
-              break;
-            case "Tab":
-              event.preventDefault();
-              moveSelection(
-                currentRowIndex,
-                event.shiftKey ? Math.max(currentColIndex - 1, 0) : Math.min(currentColIndex + 1, visibleCols.length - 1),
-                false
-              );
-              break;
-            case "Enter":
-              event.preventDefault();
-              if (event.metaKey || event.ctrlKey || event.altKey) {
-                break;
-              }
-              if (event.shiftKey) {
-                moveSelection(Math.max(currentRowIndex - 1, 0), currentColIndex, false);
-                break;
-              }
-              moveSelection(Math.min(currentRowIndex + 1, visibleRows.length - 1), currentColIndex, false);
-              break;
-            case "Backspace":
-            case "Delete":
-              if (!readOnly) {
-                event.preventDefault();
-                clearSelectedCells();
-              }
-              break;
-            case "F2":
-              if (!readOnly) {
-                event.preventDefault();
-                startEditing(currentCell);
-              }
-              break;
-            default:
-              break;
-          }
-        }}
-        onPaste={(event) => {
-          if (editingCell || readOnly) {
-            return;
-          }
-
-          const clipboard = event.clipboardData;
-          if (!clipboard) {
-            event.preventDefault();
-            void pasteFromClipboard();
-            return;
-          }
-
-          const structuredPayload = clipboard.getData(INTERNAL_CLIPBOARD_MIME);
-          const textPayload = clipboard.getData("text/plain");
-          if (!structuredPayload && !textPayload) {
-            return;
-          }
-
+        if (normalizedKey === "z") {
           event.preventDefault();
-          if (structuredPayload) {
-            pasteStructuredClipboardData(structuredPayload);
-            return;
-          }
+          undo();
+          return;
+        }
 
-          pasteText(textPayload);
-        }}
-        tabIndex={0}
-        style={{
-          ["--xlsx-menu-active" as string]: selectionFill,
-          ["--xlsx-menu-border" as string]: palette.strongBorder,
-          ["--xlsx-menu-surface" as string]: palette.surface,
-          ["--xlsx-selection-header" as string]: selectionHeaderSurface,
-          backgroundColor: palette.canvas,
-          color: palette.text,
-          cursor: resizeGuide?.type === "column" ? "col-resize" : resizeGuide?.type === "row" ? "row-resize" : undefined,
-          flex: 1,
-          height: "100%",
-          minHeight: 0,
-          minWidth: 0,
-          outline: "none",
-          overflow: "auto",
-          width: "100%"
-        }}
-      >
-        <div
+        if (normalizedKey === "y") {
+          event.preventDefault();
+          redo();
+          return;
+        }
+      }
+
+      const currentCell = resolveCurrentCell();
+      if (!currentCell) {
+        return;
+      }
+
+      const currentRowIndex = rowIndexByActual.get(currentCell.row) ?? 0;
+      const currentColIndex = colIndexByActual.get(currentCell.col) ?? 0;
+
+      if (!readOnly && isPrintableKey(event)) {
+        event.preventDefault();
+        startEditing(currentCell, event.key);
+        return;
+      }
+
+      switch (event.key) {
+        case "ArrowDown":
+          event.preventDefault();
+          moveSelection(Math.min(currentRowIndex + 1, visibleRows.length - 1), currentColIndex, event.shiftKey);
+          break;
+        case "ArrowUp":
+          event.preventDefault();
+          moveSelection(Math.max(currentRowIndex - 1, 0), currentColIndex, event.shiftKey);
+          break;
+        case "ArrowLeft":
+          event.preventDefault();
+          moveSelection(currentRowIndex, Math.max(currentColIndex - 1, 0), event.shiftKey);
+          break;
+        case "ArrowRight":
+          event.preventDefault();
+          moveSelection(currentRowIndex, Math.min(currentColIndex + 1, visibleCols.length - 1), event.shiftKey);
+          break;
+        case "Tab":
+          event.preventDefault();
+          moveSelection(
+            currentRowIndex,
+            event.shiftKey ? Math.max(currentColIndex - 1, 0) : Math.min(currentColIndex + 1, visibleCols.length - 1),
+            false
+          );
+          break;
+        case "Enter":
+          event.preventDefault();
+          if (event.metaKey || event.ctrlKey || event.altKey) {
+            break;
+          }
+          if (event.shiftKey) {
+            moveSelection(Math.max(currentRowIndex - 1, 0), currentColIndex, false);
+            break;
+          }
+          moveSelection(Math.min(currentRowIndex + 1, visibleRows.length - 1), currentColIndex, false);
+          break;
+        case "Backspace":
+        case "Delete":
+          if (!readOnly) {
+            event.preventDefault();
+            clearSelectedCells();
+          }
+          break;
+        case "F2":
+          if (!readOnly) {
+            event.preventDefault();
+            startEditing(currentCell);
+          }
+          break;
+        default:
+          break;
+      }
+    },
+    onPaste: (event) => {
+      if (editingCell || readOnly) {
+        return;
+      }
+
+      const clipboard = event.clipboardData;
+      if (!clipboard) {
+        event.preventDefault();
+        void pasteFromClipboard();
+        return;
+      }
+
+      const structuredPayload = clipboard.getData(INTERNAL_CLIPBOARD_MIME);
+      const textPayload = clipboard.getData("text/plain");
+      if (!structuredPayload && !textPayload) {
+        return;
+      }
+
+      event.preventDefault();
+      if (structuredPayload) {
+        pasteStructuredClipboardData(structuredPayload);
+        return;
+      }
+
+      pasteText(textPayload);
+    },
+    tabIndex: 0,
+    style: {
+      ["--xlsx-menu-active" as string]: selectionFill,
+      ["--xlsx-menu-border" as string]: palette.strongBorder,
+      ["--xlsx-menu-surface" as string]: palette.surface,
+      ["--xlsx-selection-header" as string]: selectionHeaderSurface,
+      backgroundColor: palette.canvas,
+      color: palette.text,
+      cursor: resizeGuide?.type === "column" ? "col-resize" : resizeGuide?.type === "row" ? "row-resize" : undefined,
+      flex: 1,
+      height: "100%",
+      minHeight: 0,
+      minWidth: 0,
+      outline: "none",
+      overflow: "auto",
+      width: "100%"
+    }
+  };
+
+  const scrollerContent = (
+    <div
           style={{
             backgroundColor: resolveSheetSurface(activeSheet, palette),
             minHeight: "100%",
@@ -14515,7 +14516,13 @@ function XlsxGrid({
             ) : null}
           </div>
         </div>
-      </div>
+  );
+
+  return (
+    <div style={{ backgroundColor: palette.canvas, display: "flex", flex: 1, minHeight: 0, minWidth: 0 }}>
+      {renderScroller
+        ? renderScroller({ children: scrollerContent, viewportProps: scrollerViewportProps })
+        : <div {...scrollerViewportProps}>{scrollerContent}</div>}
     </div>
   );
 }
@@ -14537,6 +14544,7 @@ function XlsxViewerInner({
   renderChartLoading,
   renderImage,
   renderImageSelection,
+  renderScroller,
   renderTableHeaderMenu,
   rounded = true,
   selectionColor,
@@ -14607,6 +14615,7 @@ function XlsxViewerInner({
                 renderChartLoading={renderChartLoading}
                 renderImage={renderImage}
                 renderImageSelection={renderImageSelection}
+                renderScroller={renderScroller}
                 renderTableHeaderMenu={renderTableHeaderMenu}
                 selectionColor={selectionColor}
                 selectionFillColor={selectionFillColor}

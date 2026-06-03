@@ -608,6 +608,18 @@ export interface XlsxFileTooLargeRenderProps {
   maxFileSizeBytes: number;
 }
 
+export interface XlsxScrollerRenderProps {
+  /** Workbook grid content that should be rendered inside the scrollable viewport. */
+  children: React.ReactNode;
+  /** Props that must be applied to the actual scrollable viewport element. */
+  viewportProps: React.HTMLAttributes<HTMLDivElement> & {
+    key: React.Key;
+    ref: React.Ref<HTMLDivElement>;
+    style: React.CSSProperties;
+    tabIndex: number;
+  };
+}
+
 export interface UseXlsxViewerControllerOptions {
   /**
    * Allows row and column resizing even while editing is disabled by `readOnly`.
@@ -1082,6 +1094,23 @@ export interface XlsxViewerProps extends UseXlsxViewerControllerOptions {
   renderImage?: (props: XlsxImageRenderProps) => React.ReactNode;
   /** Replaces the selected-image outline and resize handles. */
   renderImageSelection?: (props: XlsxImageSelectionRenderProps) => React.ReactNode;
+  /**
+   * Replaces the scroll viewport shell. Spread `viewportProps` onto the actual scrollable viewport element.
+   *
+   * @example
+   * ```tsx
+   * <XlsxViewer
+   *   renderScroller={({ children, viewportProps }) => (
+   *     <ScrollAreaPrimitive.Root className="h-full min-h-0 w-full min-w-0 flex-1">
+   *       <ScrollAreaPrimitive.Viewport {...viewportProps}>{children}</ScrollAreaPrimitive.Viewport>
+   *       <ScrollBar />
+   *       <ScrollAreaPrimitive.Corner />
+   *     </ScrollAreaPrimitive.Root>
+   *   )}
+   * />
+   * ```
+   */
+  renderScroller?: (props: XlsxScrollerRenderProps) => React.ReactNode;
   /**
    * Toggles the default rounded outer shell.
    *

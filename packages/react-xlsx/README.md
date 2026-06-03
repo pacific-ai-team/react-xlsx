@@ -348,6 +348,40 @@ Common rendering props:
 - `renderImageSelection?: (props: XlsxImageSelectionRenderProps) => React.ReactNode`
 - `renderChartLoading?: (props: XlsxChartLoadingRenderProps) => React.ReactNode`
 - `renderTableHeaderMenu?: (props: XlsxTableHeaderMenuRenderProps) => React.ReactNode`
+- `renderScroller?: (props: XlsxScrollerRenderProps) => React.ReactNode`
+
+### Custom Scroll Area
+
+By default, the viewer renders its native scroll viewport with the browser scrollbar. To use a custom scroll area, provide `renderScroller` and spread `viewportProps` onto the actual scrollable viewport element:
+
+```tsx
+import { ScrollArea as ScrollAreaPrimitive } from "@base-ui/react/scroll-area";
+import { XlsxViewer } from "@extend-ai/react-xlsx";
+
+function Workbook() {
+  return (
+    <XlsxViewer
+      src="/model.xlsx"
+      renderScroller={({ children, viewportProps }) => (
+        <ScrollAreaPrimitive.Root className="h-full min-h-0 w-full min-w-0 flex-1">
+          <ScrollAreaPrimitive.Viewport {...viewportProps}>
+            {children}
+          </ScrollAreaPrimitive.Viewport>
+          <ScrollAreaPrimitive.Scrollbar orientation="vertical">
+            <ScrollAreaPrimitive.Thumb />
+          </ScrollAreaPrimitive.Scrollbar>
+          <ScrollAreaPrimitive.Scrollbar orientation="horizontal">
+            <ScrollAreaPrimitive.Thumb />
+          </ScrollAreaPrimitive.Scrollbar>
+          <ScrollAreaPrimitive.Corner />
+        </ScrollAreaPrimitive.Root>
+      )}
+    />
+  );
+}
+```
+
+`viewportProps` includes the viewer ref, scroll handler, keyboard/copy/paste handlers, focus state, and required sizing styles. Applying those props to the scroll area root instead of the viewport can break virtualization, canvas synchronization, and keyboard navigation.
 
 ## Workbook Support
 
@@ -380,6 +414,7 @@ The package exports the main types you are likely to use for custom integrations
 - `XlsxViewerImages`
 - `XlsxViewerCharts`
 - `XlsxViewerThumbnails`
+- `XlsxScrollerRenderProps`
 - `XlsxSheetThumbnail`
 - `UseXlsxViewerThumbnailsOptions`
 - `XlsxChart`, `XlsxChartSeries`, `XlsxChartAxis`, `XlsxChartsheet`

@@ -30,6 +30,7 @@ export type {
   XlsxImageRenderProps,
   XlsxImageResizeHandlePosition,
   XlsxImageSelectionRenderProps,
+  XlsxScrollerRenderProps,
   XlsxShape,
   XlsxShapeFill,
   XlsxShapeParagraph,
