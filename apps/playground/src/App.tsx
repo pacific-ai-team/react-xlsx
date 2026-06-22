@@ -1,5 +1,15 @@
 import * as React from "react";
 import {
+  AlignHorizontalJustifyCenter,
+  AlignHorizontalJustifyEnd,
+  AlignHorizontalJustifyStart,
+  AlignVerticalJustifyCenter,
+  AlignVerticalJustifyEnd,
+  AlignVerticalJustifyStart,
+  RotateCw,
+  WrapText,
+} from "lucide-react";
+import {
   useXlsxViewer,
   useXlsxViewerController,
   useXlsxViewerEditing,
@@ -503,25 +513,81 @@ function WorkbookToolbar({
               <RibbonGroup label="Alignment">
                 <div className="flex flex-col gap-1">
                   <ButtonGroup>
-                    <RibbonButton disabled={!canEditSelection} label="Align left" onClick={() => applyAlignmentStyle({ horizontal: "left" })}>
-                      Left
+                    <RibbonButton
+                      className="w-8 px-0"
+                      disabled={!canEditSelection}
+                      label="Align left"
+                      onClick={() => applyAlignmentStyle({ horizontal: "left" })}
+                      tooltip="Align left"
+                    >
+                      <AlignHorizontalJustifyStart />
                     </RibbonButton>
-                    <RibbonButton disabled={!canEditSelection} label="Center" onClick={() => applyAlignmentStyle({ horizontal: "center" })}>
-                      Center
+                    <RibbonButton
+                      className="w-8 px-0"
+                      disabled={!canEditSelection}
+                      label="Center"
+                      onClick={() => applyAlignmentStyle({ horizontal: "center" })}
+                      tooltip="Center"
+                    >
+                      <AlignHorizontalJustifyCenter />
                     </RibbonButton>
-                    <RibbonButton disabled={!canEditSelection} label="Align right" onClick={() => applyAlignmentStyle({ horizontal: "right" })}>
-                      Right
+                    <RibbonButton
+                      className="w-8 px-0"
+                      disabled={!canEditSelection}
+                      label="Align right"
+                      onClick={() => applyAlignmentStyle({ horizontal: "right" })}
+                      tooltip="Align right"
+                    >
+                      <AlignHorizontalJustifyEnd />
                     </RibbonButton>
                   </ButtonGroup>
                   <ButtonGroup>
-                    <RibbonButton disabled={!canEditSelection} label="Middle align" onClick={() => applyAlignmentStyle({ vertical: "center" })}>
-                      Middle
+                    <RibbonButton
+                      className="w-8 px-0"
+                      disabled={!canEditSelection}
+                      label="Top align"
+                      onClick={() => applyAlignmentStyle({ vertical: "top" })}
+                      tooltip="Top align"
+                    >
+                      <AlignVerticalJustifyStart />
                     </RibbonButton>
-                    <RibbonButton disabled={!canEditSelection} label="Wrap text" onClick={() => applyAlignmentStyle({ wrapText: true })}>
-                      Wrap
+                    <RibbonButton
+                      className="w-8 px-0"
+                      disabled={!canEditSelection}
+                      label="Middle align"
+                      onClick={() => applyAlignmentStyle({ vertical: "center" })}
+                      tooltip="Middle align"
+                    >
+                      <AlignVerticalJustifyCenter />
                     </RibbonButton>
-                    <RibbonButton disabled={!canEditSelection} label="Rotate text" onClick={() => applyAlignmentStyle({ rotation: 45 })}>
-                      Rotate
+                    <RibbonButton
+                      className="w-8 px-0"
+                      disabled={!canEditSelection}
+                      label="Bottom align"
+                      onClick={() => applyAlignmentStyle({ vertical: "bottom" })}
+                      tooltip="Bottom align"
+                    >
+                      <AlignVerticalJustifyEnd />
+                    </RibbonButton>
+                  </ButtonGroup>
+                  <ButtonGroup>
+                    <RibbonButton
+                      className="w-8 px-0"
+                      disabled={!canEditSelection}
+                      label="Wrap text"
+                      onClick={() => applyAlignmentStyle({ wrapText: true })}
+                      tooltip="Wrap text"
+                    >
+                      <WrapText />
+                    </RibbonButton>
+                    <RibbonButton
+                      className="w-8 px-0"
+                      disabled={!canEditSelection}
+                      label="Rotate text"
+                      onClick={() => applyAlignmentStyle({ rotation: 45 })}
+                      tooltip="Rotate text"
+                    >
+                      <RotateCw />
                     </RibbonButton>
                   </ButtonGroup>
                 </div>

@@ -657,6 +657,21 @@ function resolveCanvasLineHeight(style: React.CSSProperties, fallbackFontSize = 
   return fontSizePx * 1.2;
 }
 
+function resolveCanvasTextMiddleY(
+  verticalAlign: React.CSSProperties["verticalAlign"],
+  contentTop: number,
+  contentHeight: number,
+  lineHeight: number
+) {
+  if (verticalAlign === "top") {
+    return contentTop + (lineHeight / 2);
+  }
+  if (verticalAlign === "middle") {
+    return contentTop + (contentHeight / 2);
+  }
+  return contentTop + contentHeight - (lineHeight / 2);
+}
+
 function resolveCanvasWrapIndex(
   context: CanvasRenderingContext2D,
   text: string,
@@ -12257,9 +12272,12 @@ function XlsxGrid({
             const textColor = canvasCellStyle.textColor;
             const shouldEllipsizeText = canvasCellStyle.textOverflowEllipsis;
             const shouldWrapText = canvasCellStyle.usesWrappedText || rawText.includes("\n");
+            const singleLineHeight = cellData.shrinkToFitFontSizePx
+              ? resolveCanvasLineHeight(cellStyle, cellData.shrinkToFitFontSizePx)
+              : resolveCanvasLineHeight(cellStyle, 12 * zoomFactor);
 
             if (cellData.textRotationDeg && rawText.length > 0) {
-              const textY = contentTop + (contentHeight / 2);
+              const textY = resolveCanvasTextMiddleY(cellStyle.verticalAlign, contentTop, contentHeight, singleLineHeight);
               const rotationOriginX = contentLeft + (contentWidth / 2);
               paneContext.save();
               paneContext.translate(rotationOriginX, textY);
@@ -12306,7 +12324,7 @@ function XlsxGrid({
               });
             } else if (spillMaxWidth != null) {
               const text = shouldEllipsizeText ? truncateCanvasText(paneContext, rawText, maxTextWidth) : rawText;
-              const textY = contentTop + (contentHeight / 2);
+              const textY = resolveCanvasTextMiddleY(cellStyle.verticalAlign, contentTop, contentHeight, singleLineHeight);
               deferredSpillTextsByPane[pane].push({
                 align,
                 clipHeight: contentHeight + (textClipOverscan * 2),
@@ -12330,7 +12348,7 @@ function XlsxGrid({
                 : shouldEllipsizeText
                   ? truncateCanvasText(paneContext, rawText, maxTextWidth)
                   : rawText;
-              const textY = contentTop + (contentHeight / 2);
+              const textY = resolveCanvasTextMiddleY(cellStyle.verticalAlign, contentTop, contentHeight, singleLineHeight);
               paneContext.fillText(text, textX, textY);
               drawCanvasTextDecorations(paneContext, {
                 align,
@@ -16177,14 +16195,15 @@ export function useXlsxViewerThumbnails(
                 : align === "center"
                   ? contentLeft + (contentWidth / 2)
                   : contentLeft;
-              const textY = contentTop + (contentHeight / 2);
               const trailingInset = cellData.conditionalIcon ? 18 : 0;
               const maxTextWidth = Math.max(0, contentWidth - trailingInset);
+              const singleLineHeight = resolveCanvasLineHeight(cellData.style, 12);
 
               if (cellData.textRotationDeg) {
+                const alignedTextY = resolveCanvasTextMiddleY(cellData.style.verticalAlign, contentTop, contentHeight, singleLineHeight);
                 const rotationOriginX = contentLeft + (contentWidth / 2);
                 context.save();
-                context.translate(rotationOriginX, textY);
+                context.translate(rotationOriginX, alignedTextY);
                 context.rotate((cellData.textRotationDeg * Math.PI) / 180);
                 context.fillText(
                   rawText,
@@ -16213,7 +16232,7 @@ export function useXlsxViewerThumbnails(
                 const text = canvasCellStyle.textOverflowEllipsis
                   ? truncateCanvasText(context, rawText, maxTextWidth)
                   : rawText;
-                context.fillText(text, textX, textY);
+                context.fillText(text, textX, resolveCanvasTextMiddleY(cellData.style.verticalAlign, contentTop, contentHeight, singleLineHeight));
               }
             }
 
