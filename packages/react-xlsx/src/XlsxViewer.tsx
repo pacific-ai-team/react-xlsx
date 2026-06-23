@@ -8875,10 +8875,6 @@ function XlsxGrid({
   const viewportRowBatch = getRowsBatchAsync ? asyncViewportRowBatch : syncViewportRowBatch;
 
   React.useEffect(() => {
-    cellRenderCacheRef.current.clear();
-  }, [activeSheetIndex, displayColLimit, displayRowLimit, getCellStyle, palette, revision, viewportRowBatch, worksheet, zoomFactor]);
-
-  React.useEffect(() => {
     setAsyncViewportRowBatch(null);
   }, [activeSheetIndex, revision]);
 
@@ -8900,9 +8896,40 @@ function XlsxGrid({
     [activeSheet, chartRangeHighlights]
   );
 
-  React.useEffect(() => {
+  const cellRenderCacheInvalidationKey = React.useMemo(
+    () =>
+      [
+        activeSheetChartHighlights,
+        activeSheetIndex,
+        displayColLimit,
+        displayRowLimit,
+        getCellStyle,
+        palette,
+        revision,
+        selectedChartId,
+        viewportRowBatch,
+        worksheet,
+        zoomFactor
+      ] as const,
+    [
+      activeSheetChartHighlights,
+      activeSheetIndex,
+      displayColLimit,
+      displayRowLimit,
+      getCellStyle,
+      palette,
+      revision,
+      selectedChartId,
+      viewportRowBatch,
+      worksheet,
+      zoomFactor
+    ]
+  );
+  const cellRenderCacheInvalidationRef = React.useRef<typeof cellRenderCacheInvalidationKey | null>(null);
+  if (cellRenderCacheInvalidationRef.current !== cellRenderCacheInvalidationKey) {
     cellRenderCacheRef.current.clear();
-  }, [activeSheetChartHighlights, selectedChartId]);
+    cellRenderCacheInvalidationRef.current = cellRenderCacheInvalidationKey;
+  }
 
   const getCellData = React.useCallback((row: number, col: number): CellRenderData => {
     const cacheKey = `${row}:${col}`;
@@ -9164,6 +9191,7 @@ function XlsxGrid({
   }, [
     activeSheet,
     activeSheetChartHighlights,
+    cellRenderCacheInvalidationKey,
     colIndexByActual,
     colPrefixSums,
     displayDefaultColWidth,
