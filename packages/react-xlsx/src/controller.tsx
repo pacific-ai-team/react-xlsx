@@ -1955,10 +1955,13 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
   const readOnly = requestedReadOnly || forcedReadOnly;
   const canResizeReadOnly = requestedReadOnly && allowResizeInReadOnly && !forcedReadOnly;
   const workerSupported = useWorker && typeof Worker !== "undefined" && canUseConfiguredWasmSourceInWorker();
-  const shouldUseWorker = workerSupported && forcedReadOnly;
+  const canUseWorkerForRequestedReadOnly = requestedReadOnly;
   const shouldForceReadOnlyForBuffer = React.useCallback((bufferByteLength: number) => (
     !requestedReadOnly && readOnlyAboveBytes > 0 && bufferByteLength > readOnlyAboveBytes
   ), [readOnlyAboveBytes, requestedReadOnly]);
+  const shouldUseWorkerForReadOnlyLoad = React.useCallback((willForceReadOnly: boolean) => (
+    workerSupported && (willForceReadOnly || canUseWorkerForRequestedReadOnly)
+  ), [canUseWorkerForRequestedReadOnly, workerSupported]);
 
   const disposeWorkerClient = React.useCallback(() => {
     workerClientRef.current?.dispose();
@@ -2024,9 +2027,6 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
   }) => {
     for (const sheetCharts of snapshot.chartsByWorkbookSheetIndex) {
       for (const chart of sheetCharts) {
-        if (!chart.chartPath) {
-          return true;
-        }
         if (chart.chartType !== "Bubble") {
           continue;
         }
@@ -2317,7 +2317,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
 
         const shouldForceReadOnly = shouldForceReadOnlyForBuffer(buffer.byteLength);
         setForcedReadOnly(shouldForceReadOnly);
-        const shouldUseWorkerForLoad = workerSupported && shouldForceReadOnly;
+        const shouldUseWorkerForLoad = shouldUseWorkerForReadOnlyLoad(shouldForceReadOnly);
         const effectiveSkipXmlParsing = shouldSkipXmlParsingForWorkbook(new Uint8Array(buffer), skipXmlParsing);
 
         if (shouldDeferLoading && buffer.byteLength > deferLoadingAboveBytes) {
@@ -2423,13 +2423,12 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
     hasIncompleteWorkerChartSnapshot,
     loadWorkbookOnMainThread,
     maxFileSizeBytes,
-    requestedReadOnly,
     setImageAssets,
     startChartDisplayHydration,
     shouldFallbackFromWorkerError,
     shouldDeferLoading,
     shouldForceReadOnlyForBuffer,
-    workerSupported,
+    shouldUseWorkerForReadOnlyLoad,
     src,
     showHiddenSheets
   ]);
@@ -2577,7 +2576,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
 
     const shouldForceReadOnly = shouldForceReadOnlyForBuffer(deferredBuffer.byteLength);
     setForcedReadOnly(shouldForceReadOnly);
-    const shouldUseWorkerForLoad = workerSupported && shouldForceReadOnly;
+    const shouldUseWorkerForLoad = shouldUseWorkerForReadOnlyLoad(shouldForceReadOnly);
     const effectiveSkipXmlParsing = shouldSkipXmlParsingForWorkbook(new Uint8Array(deferredBuffer), skipXmlParsing);
 
     if (shouldUseWorkerForLoad) {
@@ -2698,14 +2697,13 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
     disposeWorkerClient,
     getWorkerClient,
     loadWorkbookOnMainThread,
-    requestedReadOnly,
     setImageAssets,
     startChartDisplayHydration,
     hasIncompleteWorkerChartSnapshot,
     maxFileSizeBytes,
     shouldFallbackFromWorkerError,
     shouldForceReadOnlyForBuffer,
-    workerSupported
+    shouldUseWorkerForReadOnlyLoad
   ]);
 
   const maybeRecalculateWorkbook = React.useCallback((targetWorkbook: Workbook) => {
@@ -3588,8 +3586,70 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
     setShouldAutoCalculate(false);
   }, [refreshWorkbookState, workbook]);
 
+  const applyReadOnlyResizeOverride = React.useCallback((
+    axis: "column" | "row",
+    actualIndex: number,
+    sizePx: number
+  ) => {
+    if (!activeSheet) {
+      return;
+    }
+
+    const contentSizePx = resolveContentSheetAxisPixels(sizePx, activeSheet.showGridLines);
+    const targetWorkbookSheetIndex = activeSheet.workbookSheetIndex;
+    setSheets((currentSheets) => currentSheets.map((sheet) => {
+      if (sheet.workbookSheetIndex !== targetWorkbookSheetIndex) {
+        return sheet;
+      }
+
+      if (axis === "column") {
+        const nextColWidthOverridesPx = {
+          ...sheet.colWidthOverridesPx,
+          [actualIndex]: contentSizePx
+        };
+        const nextColWidths = [...sheet.colWidths];
+        const visibleColIndex = sheet.visibleCols.indexOf(actualIndex);
+        if (visibleColIndex >= 0) {
+          nextColWidths[visibleColIndex] = contentSizePx;
+        }
+
+        return {
+          ...sheet,
+          colWidthOverridesPx: nextColWidthOverridesPx,
+          colWidths: nextColWidths
+        };
+      }
+
+      const nextRowHeightOverridesPx = {
+        ...sheet.rowHeightOverridesPx,
+        [actualIndex]: contentSizePx
+      };
+      const nextRowHeights = [...sheet.rowHeights];
+      const visibleRowIndex = sheet.visibleRows.indexOf(actualIndex);
+      if (visibleRowIndex >= 0) {
+        nextRowHeights[visibleRowIndex] = contentSizePx;
+      }
+
+      return {
+        ...sheet,
+        rowHeightOverridesPx: nextRowHeightOverridesPx,
+        rowHeights: nextRowHeights
+      };
+    }));
+    setRevision((current) => current + 1);
+  }, [activeSheet]);
+
   const resizeColumn = React.useCallback((col: number, widthPx: number) => {
-    if ((readOnly && !canResizeReadOnly) || !workbook || !activeSheet) {
+    if ((readOnly && !canResizeReadOnly) || !activeSheet) {
+      return;
+    }
+
+    if (isWorkerBacked) {
+      applyReadOnlyResizeOverride("column", col, widthPx);
+      return;
+    }
+
+    if (!workbook) {
       return;
     }
 
@@ -3600,10 +3660,28 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       pxToSheetColumnWidth(resolveContentSheetAxisPixels(widthPx, activeSheet.showGridLines))
     );
     refreshWorkbookState(workbook);
-  }, [activeSheet, canResizeReadOnly, readOnly, recordHistoryBeforeMutation, refreshWorkbookState, workbook]);
+  }, [
+    activeSheet,
+    applyReadOnlyResizeOverride,
+    canResizeReadOnly,
+    isWorkerBacked,
+    readOnly,
+    recordHistoryBeforeMutation,
+    refreshWorkbookState,
+    workbook
+  ]);
 
   const resizeRow = React.useCallback((row: number, heightPx: number) => {
-    if ((readOnly && !canResizeReadOnly) || !workbook || !activeSheet) {
+    if ((readOnly && !canResizeReadOnly) || !activeSheet) {
+      return;
+    }
+
+    if (isWorkerBacked) {
+      applyReadOnlyResizeOverride("row", row, heightPx);
+      return;
+    }
+
+    if (!workbook) {
       return;
     }
 
@@ -3614,7 +3692,16 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       pxToSheetRowHeight(resolveContentSheetAxisPixels(heightPx, activeSheet.showGridLines))
     );
     refreshWorkbookState(workbook);
-  }, [activeSheet, canResizeReadOnly, readOnly, recordHistoryBeforeMutation, refreshWorkbookState, workbook]);
+  }, [
+    activeSheet,
+    applyReadOnlyResizeOverride,
+    canResizeReadOnly,
+    isWorkerBacked,
+    readOnly,
+    recordHistoryBeforeMutation,
+    refreshWorkbookState,
+    workbook
+  ]);
 
   const resolveAnchoredObjectRect = React.useCallback((
     anchor: XlsxImage["anchor"],

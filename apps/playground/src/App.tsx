@@ -29,6 +29,7 @@ import {
   PlaygroundIcon,
   usePlaygroundCustomizer,
 } from "./components/playground-customizer";
+import { Badge } from "./components/ui/badge";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "./components/ui/dropdown-menu";
 import { Input } from "./components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
@@ -229,8 +230,37 @@ function ViewerFileTooLargeState() {
   );
 }
 
+function isXlsxWorkerScriptResource(name: string) {
+  return name.includes("xlsx-worker.js?worker_file")
+    || /\/xlsx-worker(?:-[^/]+)?\.js(?:$|\?)/.test(name);
+}
+
+function useXlsxWorkerScriptDebug() {
+  const [scriptLoadCount, setScriptLoadCount] = React.useState(0);
+
+  React.useEffect(() => {
+    if (typeof performance === "undefined" || typeof window === "undefined") {
+      return;
+    }
+
+    const readWorkerResources = () => {
+      const nextCount = performance
+        .getEntriesByType("resource")
+        .filter((entry) => isXlsxWorkerScriptResource(entry.name)).length;
+      setScriptLoadCount((currentCount) => currentCount === nextCount ? currentCount : nextCount);
+    };
+
+    readWorkerResources();
+    const intervalId = window.setInterval(readWorkerResources, 500);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  return scriptLoadCount;
+}
+
 function WorkbookToolbar({
   experimentalCanvas,
+  allowResizeInReadOnly,
   highlightCells,
   isDocumentDark,
   onClear,
@@ -239,12 +269,16 @@ function WorkbookToolbar({
   onOpenFile,
   readOnly,
   remoteUrl,
+  setAllowResizeInReadOnly,
   setExperimentalCanvas,
   setHighlightCells,
   setIsDocumentDark,
   setReadOnly,
   setRemoteUrl,
+  setUseWorker,
+  useWorker,
 }: {
+  allowResizeInReadOnly: boolean;
   experimentalCanvas: boolean;
   highlightCells: boolean;
   isDocumentDark: boolean;
@@ -254,11 +288,14 @@ function WorkbookToolbar({
   onOpenFile: () => void;
   readOnly: boolean;
   remoteUrl: string;
+  setAllowResizeInReadOnly: (value: boolean) => void;
   setExperimentalCanvas: (value: boolean) => void;
   setHighlightCells: (value: boolean) => void;
   setIsDocumentDark: (value: boolean) => void;
   setReadOnly: (value: boolean) => void;
   setRemoteUrl: (value: string) => void;
+  setUseWorker: (value: boolean) => void;
+  useWorker: boolean;
 }) {
   const [activeRibbonTab, setActiveRibbonTab] = React.useState<RibbonTab>("Home");
   const [fontFamily, setFontFamily] = React.useState<(typeof FONT_FAMILIES)[number]>("Aptos");
@@ -275,6 +312,9 @@ function WorkbookToolbar({
     download,
     exportCsv,
     exportXlsx,
+    isLoadDeferred,
+    isLoading,
+    isWorkerBacked,
     recalculate,
     setActiveSheetIndex,
     sheets,
@@ -302,6 +342,33 @@ function WorkbookToolbar({
   const hasSelection = Boolean(selection);
   const hasActiveCell = Boolean(activeCellAddress);
   const isReadOnly = readOnly || viewerReadOnly;
+  const workerScriptLoadCount = useXlsxWorkerScriptDebug();
+  const workerApiAvailable = typeof Worker !== "undefined";
+  const workbookRuntimeLabel = isLoading
+    ? "Loading"
+    : isLoadDeferred
+      ? "Deferred"
+      : hasWorkbook
+        ? isWorkerBacked
+          ? "Worker"
+          : "Main"
+        : "No file";
+  const workbookRuntimeDetail = !workerApiAvailable
+    ? "Worker API unavailable in this runtime."
+    : isWorkerBacked
+      ? "Workbook rows and cell metadata are served from xlsx-worker.js."
+      : !useWorker
+      ? "useWorker is disabled."
+      : isReadOnly && allowResizeInReadOnly
+          ? "Read-only resize is view-only when the workbook is worker-backed."
+          : isReadOnly
+            ? "Worker requested; reload or fallback state is still main-thread."
+            : "Edit mode keeps the mutable workbook on the main thread.";
+  const runtimeDotClassName = isWorkerBacked
+    ? "bg-emerald-500"
+    : useWorker && workerApiAvailable
+      ? "bg-amber-500"
+      : "bg-muted-foreground";
   const hasFormulaTarget = hasActiveCell || selectedFormulaTarget?.kind === "chartSeries";
   const formulaNameBoxValue = selectedFormulaTarget?.kind === "chartSeries"
     ? `SERIES ${selectedFormulaTarget.seriesIndex + 1}`
@@ -388,6 +455,18 @@ function WorkbookToolbar({
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <Tooltip>
+            <TooltipTrigger render={<div className="hidden items-center gap-1.5 rounded-full border bg-muted/40 px-2 py-1 text-[11px] lg:flex" />}>
+              <span className={`size-1.5 rounded-full ${runtimeDotClassName}`} />
+              <span className="text-muted-foreground">Workbook</span>
+              <span className="font-medium">{workbookRuntimeLabel}</span>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{workbookRuntimeDetail}</TooltipContent>
+          </Tooltip>
+          <div className="hidden items-center gap-1.5 rounded-md border px-2 py-1 lg:flex">
+            <span className="text-muted-foreground text-[11px] font-medium">Worker</span>
+            <Switch aria-label="Toggle worker-backed workbook loading" checked={useWorker} onCheckedChange={setUseWorker} size="sm" />
+          </div>
           <Button disabled={!canExport} onClick={exportXlsx} size="sm" variant="outline">
             <PlaygroundIcon name="download" />
             Download
@@ -879,6 +958,36 @@ function WorkbookToolbar({
                   <Switch aria-label="Toggle read only mode" checked={isReadOnly} onCheckedChange={setReadOnly} size="sm" />
                 </div>
               </RibbonGroup>
+              <RibbonGroup label="Runtime">
+                <div className="flex w-[320px] flex-col gap-1">
+                  <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
+                      <span className="text-muted-foreground text-[11px] font-medium">Use worker</span>
+                      <Switch aria-label="Toggle worker-backed workbook loading" checked={useWorker} onCheckedChange={setUseWorker} size="sm" />
+                    </div>
+                    <div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
+                      <span className="text-muted-foreground text-[11px] font-medium">Resize read-only</span>
+                      <Switch aria-label="Toggle row and column resizing in read-only mode" checked={allowResizeInReadOnly} onCheckedChange={setAllowResizeInReadOnly} size="sm" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md border px-2 py-1">
+                    <span className="text-muted-foreground truncate text-[11px] font-medium">Actual</span>
+                    <Badge
+                      className={isWorkerBacked ? "bg-emerald-600 text-white" : ""}
+                      variant={isWorkerBacked ? "default" : "outline"}
+                    >
+                      {workbookRuntimeLabel}
+                    </Badge>
+                    <span className="text-muted-foreground truncate text-[11px] font-medium">Script loads</span>
+                    <Badge variant={workerScriptLoadCount > 0 ? "secondary" : "outline"}>
+                      {workerScriptLoadCount}
+                    </Badge>
+                  </div>
+                  <div className="text-muted-foreground truncate rounded-md border px-2 py-1 text-[11px] leading-4">
+                    {workbookRuntimeDetail}
+                  </div>
+                </div>
+              </RibbonGroup>
             </>
           ) : null}
         </div>
@@ -1014,6 +1123,8 @@ export function App() {
   const [isDocumentDark, setIsDocumentDark] = React.useState(false);
   const [experimentalCanvas, setExperimentalCanvas] = React.useState(true);
   const [isReadOnly, setIsReadOnly] = React.useState(false);
+  const [useWorker, setUseWorker] = React.useState(true);
+  const [allowResizeInReadOnly, setAllowResizeInReadOnly] = React.useState(false);
   const [highlightCells, setHighlightCells] = React.useState(false);
   const dragDepthRef = React.useRef(0);
 
@@ -1033,24 +1144,27 @@ export function App() {
   const controller = useXlsxViewerController(
     source?.type === "file"
       ? {
-          allowResizeInReadOnly: true,
+          allowResizeInReadOnly,
           file: source.file,
           fileName: source.fileName,
           readOnly: isReadOnly,
-          readOnlyAboveBytes: AUTO_READ_ONLY_THRESHOLD_BYTES
+          readOnlyAboveBytes: AUTO_READ_ONLY_THRESHOLD_BYTES,
+          useWorker
         }
       : source?.type === "url"
         ? {
-            allowResizeInReadOnly: true,
+            allowResizeInReadOnly,
             src: source.src,
             fileName: source.fileName,
             readOnly: isReadOnly,
-            readOnlyAboveBytes: AUTO_READ_ONLY_THRESHOLD_BYTES
+            readOnlyAboveBytes: AUTO_READ_ONLY_THRESHOLD_BYTES,
+            useWorker
           }
         : {
-            allowResizeInReadOnly: true,
+            allowResizeInReadOnly,
             readOnly: isReadOnly,
-            readOnlyAboveBytes: AUTO_READ_ONLY_THRESHOLD_BYTES
+            readOnlyAboveBytes: AUTO_READ_ONLY_THRESHOLD_BYTES,
+            useWorker
           }
   );
   const zoomInitializedForSourceRef = React.useRef<string | null>(null);
@@ -1198,6 +1312,7 @@ export function App() {
         >
           <XlsxViewerProvider controller={controller} isDark={isDocumentDark}>
             <WorkbookToolbar
+              allowResizeInReadOnly={allowResizeInReadOnly}
               experimentalCanvas={experimentalCanvas}
               highlightCells={highlightCells}
               isDocumentDark={isDocumentDark}
@@ -1207,11 +1322,14 @@ export function App() {
               onOpenFile={() => fileInputRef.current?.click()}
               readOnly={isReadOnly}
               remoteUrl={remoteUrl}
+              setAllowResizeInReadOnly={setAllowResizeInReadOnly}
               setExperimentalCanvas={setExperimentalCanvas}
               setHighlightCells={setHighlightCells}
               setIsDocumentDark={setIsDocumentDark}
               setReadOnly={setIsReadOnly}
               setRemoteUrl={setRemoteUrl}
+              setUseWorker={setUseWorker}
+              useWorker={useWorker}
             />
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden bg-muted/20 p-2">
               <div className="min-h-0 min-w-0 flex h-full w-full overflow-hidden rounded-lg border bg-muted/40 p-2.5">
@@ -1221,7 +1339,7 @@ export function App() {
                   fileTooLargeState={<ViewerFileTooLargeState />}
                   getCellStyle={getCellStyle}
                   height="100%"
-                  allowResizeInReadOnly
+                  allowResizeInReadOnly={allowResizeInReadOnly}
                   isDark={isDocumentDark}
                   loadingState={
                     <div className="text-muted-foreground flex h-full w-full items-center justify-center text-sm">

@@ -7369,13 +7369,22 @@ function XlsxGrid({
         }
 
         widths[col] = Math.max(
-          resolveRenderedSheetAxisPixels(precomputedWidths[index] ?? activeSheet?.defaultColWidthPx ?? DEFAULT_COL_WIDTH, showGridLines),
+          resolveRenderedSheetAxisPixels(
+            activeSheet?.colWidthOverridesPx[col]
+              ?? precomputedWidths[index]
+              ?? activeSheet?.defaultColWidthPx
+              ?? DEFAULT_COL_WIDTH,
+            showGridLines
+          ),
           DEFAULT_COL_WIDTH / 2
         );
       }
 
       for (let col = Math.max(0, (activeSheet?.maxUsedCol ?? -1) + 1); col < displayColLimit; col += 1) {
-        widths[col] = fallbackWidth;
+        const overrideWidth = activeSheet?.colWidthOverridesPx[col];
+        widths[col] = overrideWidth === undefined
+          ? fallbackWidth
+          : Math.max(resolveRenderedSheetAxisPixels(overrideWidth, showGridLines), DEFAULT_COL_WIDTH / 2);
       }
 
       return widths;
@@ -7478,13 +7487,22 @@ function XlsxGrid({
         }
 
         heights[row] = Math.max(
-          resolveRenderedSheetAxisPixels(precomputedHeights[index] ?? activeSheet?.defaultRowHeightPx ?? DEFAULT_ROW_HEIGHT, showGridLines),
+          resolveRenderedSheetAxisPixels(
+            activeSheet?.rowHeightOverridesPx[row]
+              ?? precomputedHeights[index]
+              ?? activeSheet?.defaultRowHeightPx
+              ?? DEFAULT_ROW_HEIGHT,
+            showGridLines
+          ),
           DEFAULT_ROW_HEIGHT / 1.5
         );
       }
 
       for (let row = Math.max(0, (activeSheet?.maxUsedRow ?? -1) + 1); row < displayRowLimit; row += 1) {
-        heights[row] = fallbackHeight;
+        const overrideHeight = activeSheet?.rowHeightOverridesPx[row];
+        heights[row] = overrideHeight === undefined
+          ? fallbackHeight
+          : Math.max(resolveRenderedSheetAxisPixels(overrideHeight, showGridLines), DEFAULT_ROW_HEIGHT / 1.5);
       }
 
       return heights;
@@ -8862,8 +8880,29 @@ function XlsxGrid({
   const [, startSelectionTransition] = React.useTransition();
   const [asyncViewportRowBatch, setAsyncViewportRowBatch] = React.useState<WorksheetBatchWindow | null>(null);
   const viewportRequest = React.useMemo(() => {
-    const firstVirtualRowIndex = domExpandedWindow.rowIndices[0];
-    const lastVirtualRowIndex = domExpandedWindow.rowIndices[domExpandedWindow.rowIndices.length - 1];
+    const rowIndices = experimentalCanvas
+      ? (() => {
+          if (visibleRows.length === 0 || drawingViewport.height <= 0) {
+            return [] as number[];
+          }
+
+          const indices = new Set<number>(frozenRowVirtualIndices);
+          const viewportStart = Math.max(0, drawingViewport.top - displayHeaderHeight - CANVAS_VIEWPORT_OVERSCAN_PX);
+          const viewportEnd = Math.max(
+            viewportStart,
+            drawingViewport.top + drawingViewport.height - displayHeaderHeight + CANVAS_VIEWPORT_OVERSCAN_PX
+          );
+          const startIndex = findIndexForOffsetPrefix(rowPrefixSums, viewportStart);
+          const endIndex = findIndexForOffsetPrefix(rowPrefixSums, viewportEnd);
+          for (let index = Math.max(0, startIndex); index <= Math.max(startIndex, endIndex); index += 1) {
+            indices.add(index);
+          }
+
+          return Array.from(indices).sort((left, right) => left - right);
+        })()
+      : domExpandedWindow.rowIndices;
+    const firstVirtualRowIndex = rowIndices[0];
+    const lastVirtualRowIndex = rowIndices[rowIndices.length - 1];
     const firstVisibleRow = firstVirtualRowIndex === undefined ? undefined : visibleRows[firstVirtualRowIndex];
     const lastVisibleRow = lastVirtualRowIndex === undefined ? undefined : visibleRows[lastVirtualRowIndex];
     if (firstVisibleRow === undefined || lastVisibleRow === undefined || lastVisibleRow < firstVisibleRow) {
@@ -8877,7 +8916,16 @@ function XlsxGrid({
       endRow,
       startRow
     };
-  }, [domExpandedWindow.rowIndices, visibleRows]);
+  }, [
+    displayHeaderHeight,
+    domExpandedWindow.rowIndices,
+    drawingViewport.height,
+    drawingViewport.top,
+    experimentalCanvas,
+    frozenRowVirtualIndices,
+    rowPrefixSums,
+    visibleRows
+  ]);
 
   const syncViewportRowBatch = React.useMemo<WorksheetBatchWindow | null>(() => {
     if (!shouldVirtualizeRows || !worksheet || getRowsBatchAsync || !viewportRequest) {

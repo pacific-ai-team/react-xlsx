@@ -1,4 +1,5 @@
 import type { Workbook } from "@dukelib/sheets-wasm";
+import { strFromU8, unzipSync } from "fflate";
 import { loadWorkbookChartAssets } from "./charts";
 import {
   parseWorkbookChartStyleAssets,
@@ -6,8 +7,6 @@ import {
   resolveSheetColumnWidthPixels,
   resolveWorksheetDefaultColumnWidthPixels,
   resolveWorksheetDefaultRowHeightPixels,
-  resolveWorksheetHiddenCols,
-  resolveWorksheetHiddenRows,
   resolveWorksheetMergeMetadata
 } from "./images";
 import type { WorkbookStructureAssets } from "./images";
@@ -33,6 +32,9 @@ const DEFAULT_COL_WIDTH = 80;
 const DEFAULT_ZOOM_SCALE = 100;
 const FORMULA_COUNT_THRESHOLD = 1000;
 const FAST_STRUCTURE_PARSE_THRESHOLD_BYTES = 5 * 1024 * 1024;
+const MIN_ROW_HEIGHT_PX = 16;
+
+type WorkerSheetState = Partial<NonNullable<WorkbookStructureAssets["sheetStatesByWorkbookSheetIndex"][number]>>;
 
 function isLegacyXlsWorkbook(bytes: Uint8Array) {
   return bytes.byteLength >= 8
@@ -132,6 +134,102 @@ let chartsheets: XlsxChartsheet[] = [];
 let sheets: XlsxSheetData[] = [];
 let tablesByWorkbookSheetIndex: XlsxTable[][] = [];
 let tabs: XlsxWorkbookTab[] = [];
+
+function canParseXmlInWorker() {
+  return typeof DOMParser !== "undefined";
+}
+
+function decodeXmlAttribute(value: string) {
+  return value
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function readXmlAttribute(tag: string, name: string) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(?:^|\\s)${escapedName}="([^"]*)"`).exec(tag);
+  return match ? decodeXmlAttribute(match[1] ?? "") : null;
+}
+
+function readArchiveText(archive: Record<string, Uint8Array>, path: string) {
+  const entry = archive[path];
+  return entry ? strFromU8(entry) : "";
+}
+
+function normalizeWorkbookRelationshipTarget(target: string) {
+  if (target.startsWith("/")) {
+    return target.replace(/^\/+/, "");
+  }
+
+  return target.startsWith("xl/")
+    ? target
+    : `xl/${target.replace(/^\.?\//, "")}`;
+}
+
+function parseWorkbookSheetPathsFromArchive(archive: Record<string, Uint8Array>) {
+  const workbookXml = readArchiveText(archive, "xl/workbook.xml");
+  const workbookRelationshipsXml = readArchiveText(archive, "xl/_rels/workbook.xml.rels");
+  if (!workbookXml || !workbookRelationshipsXml) {
+    return [] as string[];
+  }
+
+  const relationshipTargetById = new Map<string, string>();
+  for (const match of workbookRelationshipsXml.matchAll(/<Relationship\b[^>]*>/g)) {
+    const tag = match[0];
+    const id = readXmlAttribute(tag, "Id");
+    const target = readXmlAttribute(tag, "Target");
+    if (id && target) {
+      relationshipTargetById.set(id, normalizeWorkbookRelationshipTarget(target));
+    }
+  }
+
+  const paths: string[] = [];
+  for (const match of workbookXml.matchAll(/<sheet\b[^>]*>/g)) {
+    const tag = match[0];
+    const relationshipId = readXmlAttribute(tag, "r:id") ?? readXmlAttribute(tag, "id");
+    const target = relationshipId ? relationshipTargetById.get(relationshipId) : null;
+    if (target) {
+      paths.push(target);
+    }
+  }
+
+  return paths;
+}
+
+function parseWorkerSheetLayoutAssets(bytes: Uint8Array, sheetCount: number): Array<WorkerSheetState | null> {
+  try {
+    const archive = unzipSync(bytes);
+    const workbookSheetPaths = parseWorkbookSheetPathsFromArchive(archive);
+    const sheetPaths = workbookSheetPaths.length > 0
+      ? workbookSheetPaths
+      : Array.from({ length: sheetCount }, (_, index) => `xl/worksheets/sheet${index + 1}.xml`);
+
+    return sheetPaths.slice(0, sheetCount).map((path) => {
+      const xml = readArchiveText(archive, path);
+      if (!xml) {
+        return null;
+      }
+
+      const rowHeightOverridesPx: Record<number, number> = {};
+      for (const match of xml.matchAll(/<row\b[^>]*>/g)) {
+        const tag = match[0];
+        const rowNumber = Number(readXmlAttribute(tag, "r") ?? Number.NaN);
+        const height = Number(readXmlAttribute(tag, "ht") ?? Number.NaN);
+        const rowIndex = rowNumber - 1;
+        if (rowIndex >= 0 && Number.isFinite(height)) {
+          rowHeightOverridesPx[rowIndex] = Math.max(MIN_ROW_HEIGHT_PX, Math.round(height * 1.33));
+        }
+      }
+
+      return { rowHeightOverridesPx };
+    });
+  } catch {
+    return [];
+  }
+}
 
 function buildVisibleSheetIndexByWorkbookSheetIndex(nextWorkbook: Workbook, showHiddenSheets = false) {
   const mapping = new Map<number, number>();
@@ -245,7 +343,7 @@ function parseWorksheetDataValidations(worksheet: ReturnType<Workbook["getSheet"
 
 function resolveWorksheetZoomScale(
   worksheet: ReturnType<Workbook["getSheet"]>,
-  sheetState?: WorkbookStructureAssets["sheetStatesByWorkbookSheetIndex"][number] | null
+  sheetState?: { zoomScale?: number } | null
 ) {
   const candidates = [
     sheetState?.zoomScale,
@@ -293,13 +391,14 @@ function resolveSheetDisplayUsedRange(
 function buildSheetList(
   nextWorkbook: Workbook,
   structureAssets?: WorkbookStructureAssets | null,
+  sheetLayoutStates?: Array<WorkerSheetState | null>,
   showHiddenSheets = false
 ) {
   const sheetsByWorkbookSheetIndex: XlsxSheetData[] = [];
 
   for (let index = 0; index < nextWorkbook.sheetCount; index += 1) {
     const worksheet = nextWorkbook.getSheet(index);
-    const sheetState = structureAssets?.sheetStatesByWorkbookSheetIndex[index] ?? null;
+    const sheetState = structureAssets?.sheetStatesByWorkbookSheetIndex[index] ?? sheetLayoutStates?.[index] ?? null;
     const mergeMetadata = resolveWorksheetMergeMetadata(worksheet);
     const effectiveSheetState = {
       ...sheetState,
@@ -382,16 +481,33 @@ function buildSheetList(
     }
 
     const [minRow, minCol, maxRow, maxCol] = resolveSheetDisplayUsedRange(usedRange, effectiveSheetState);
-    const hiddenRows = resolveWorksheetHiddenRows(worksheet, maxRow);
-    const hiddenCols = resolveWorksheetHiddenCols(worksheet, maxCol);
+    const visibleRows: number[] = [];
+    const hiddenRows: number[] = [];
+    for (let row = 0; row <= maxRow; row += 1) {
+      if (worksheet.isRowHidden(row)) {
+        hiddenRows.push(row);
+      } else {
+        visibleRows.push(row);
+      }
+    }
+
+    const visibleCols: number[] = [];
+    const hiddenCols: number[] = [];
+    for (let col = 0; col <= maxCol; col += 1) {
+      if (worksheet.isColumnHidden(col)) {
+        hiddenCols.push(col);
+      } else {
+        visibleCols.push(col);
+      }
+    }
 
     sheetsByWorkbookSheetIndex.push({
       cachedFormulaValues: sheetState?.cachedFormulaValues ?? {},
       columnWidthCharacterWidthPx: sheetState?.columnWidthCharacterWidthPx,
-      colCount: Math.max(0, maxCol + 1 - hiddenCols.length),
+      colCount: visibleCols.length,
       colStyleIds: sheetState?.colStyleIds ?? {},
       colWidthOverridesPx: sheetState?.colWidthOverridesPx ?? {},
-      colWidths: [],
+      colWidths: visibleCols.map(resolveColumnWidthPx),
       conditionalFormatRules: sheetState?.conditionalFormatRules ?? [],
       dataValidations: parseWorksheetDataValidations(worksheet),
       defaultColWidthPx,
@@ -410,17 +526,17 @@ function buildSheetList(
       name: worksheet.name,
       visibility,
       namedCellStyleByName: structureAssets?.namedCellStyleByName ?? {},
-      rowCount: Math.max(0, maxRow + 1 - hiddenRows.length),
+      rowCount: visibleRows.length,
       rowHeightOverridesPx: sheetState?.rowHeightOverridesPx ?? {},
-      rowHeights: [],
+      rowHeights: visibleRows.map(resolveRowHeightPx),
       rowStyleIds: sheetState?.rowStyleIds ?? {},
       showGridLines: sheetState?.showGridLines ?? true,
       sparklines: sheetState?.sparklines ?? [],
       styleById: structureAssets?.styleById ?? {},
       tableStyleByName: structureAssets?.tableStyleByName ?? {},
       themePalette: structureAssets?.themePalette ?? { colorsByIndex: {} },
-      visibleCols: [],
-      visibleRows: [],
+      visibleCols,
+      visibleRows,
       workbookSheetIndex: index,
       zoomScale: resolveWorksheetZoomScale(worksheet, sheetState)
     });
@@ -568,13 +684,14 @@ async function loadWorkbook(buffer: ArrayBuffer, skipXmlParsing = false, showHid
   const nextWorkbook = activeWorkbook;
   const shouldUseFastStructureParse =
     bytes.byteLength >= FAST_STRUCTURE_PARSE_THRESHOLD_BYTES && totalFormulas <= FORMULA_COUNT_THRESHOLD;
-  const structureAssets = effectiveSkipXmlParsing || shouldUseFastStructureParse
+  const structureAssets = effectiveSkipXmlParsing || shouldUseFastStructureParse || !canParseXmlInWorker()
     ? null
     : parseWorkbookStructureAssets(bytes, {
         includeCachedFormulaValues: true
       });
+  const sheetLayoutStates = structureAssets ? undefined : parseWorkerSheetLayoutAssets(bytes, nextWorkbook.sheetCount);
   workbook = nextWorkbook;
-  sheets = buildSheetList(nextWorkbook, structureAssets, showHiddenSheets);
+  sheets = buildSheetList(nextWorkbook, structureAssets, sheetLayoutStates, showHiddenSheets);
   tablesByWorkbookSheetIndex = Array.from({ length: nextWorkbook.sheetCount }, (_, workbookSheetIndex) =>
     mapWorksheetTables(nextWorkbook.getSheet(workbookSheetIndex))
   );
@@ -585,7 +702,9 @@ async function loadWorkbook(buffer: ArrayBuffer, skipXmlParsing = false, showHid
     const hasModernCharts = Array.isArray(worksheet.chartsEx) && worksheet.chartsEx.length > 0;
     return hasClassicCharts || hasModernCharts;
   }).some(Boolean);
-  const chartStyleAssets = effectiveSkipXmlParsing || !hasCharts ? null : parseWorkbookChartStyleAssets(bytes);
+  const chartStyleAssets = effectiveSkipXmlParsing || !hasCharts || !canParseXmlInWorker()
+    ? null
+    : parseWorkbookChartStyleAssets(bytes);
   const chartAssets = loadWorkbookChartAssets(
     nextWorkbook,
     chartStyleAssets,
@@ -622,7 +741,9 @@ async function parseCharts(buffer: ArrayBuffer, skipXmlParsing = false, showHidd
 
   const nextWorkbook = activeWorkbook;
   const visibleSheetIndexByWorkbookSheetIndex = buildVisibleSheetIndexByWorkbookSheetIndex(nextWorkbook, showHiddenSheets);
-  const chartStyleAssets = effectiveSkipXmlParsing ? null : parseWorkbookChartStyleAssets(bytes);
+  const chartStyleAssets = effectiveSkipXmlParsing || !canParseXmlInWorker()
+    ? null
+    : parseWorkbookChartStyleAssets(bytes);
   const chartAssets = loadWorkbookChartAssets(
     nextWorkbook,
     chartStyleAssets,
