@@ -12158,12 +12158,7 @@ function XlsxGrid({
           const gradientFill = !cellData.conditionalColorScale && typeof cellStyle.backgroundImage === "string"
             ? resolveCanvasGradientFill(paneContext, localRect, cellStyle.backgroundImage)
             : null;
-          const hasExplicitCellFill =
-            cellData.conditionalColorScale !== null
-            || gradientFill !== null
-            || (typeof cellStyle.backgroundColor === "string"
-              && cellStyle.backgroundColor !== sheetSurface);
-          if (hasExplicitCellFill || cellData.chartHighlight) {
+          if (cellData.chartHighlight) {
             flushPendingGridlines();
           }
           paneContext.fillStyle = gradientFill ?? fillColor;
@@ -12222,7 +12217,7 @@ function XlsxGrid({
           const resolvedRightBorder = resolveCanvasBoundaryBorder(rightBorder, rightNeighborLeftBorder);
           const resolvedBottomBorder = resolveCanvasBoundaryBorder(bottomBorder, bottomNeighborTopBorder);
 
-          if (showGridLines && !hasExplicitCellFill && (!resolvedRightBorder || !resolvedBottomBorder)) {
+          if (showGridLines && (!resolvedRightBorder || !resolvedBottomBorder)) {
             enqueueGridlinePath();
             if (!resolvedRightBorder) {
               paneContext.moveTo(localRect.left + localRect.width - 0.5, localRect.top);
@@ -16305,12 +16300,6 @@ export function useXlsxViewerThumbnails(
               : null;
             const fillColor = cellData.conditionalColorScale?.color
               ?? (typeof cellData.style.backgroundColor === "string" ? cellData.style.backgroundColor : thumbnailSheetSurface);
-            const hasExplicitCellFill =
-              cellData.conditionalColorScale !== null
-              || gradientFill !== null
-              || (typeof cellData.style.backgroundColor === "string"
-                && cellData.style.backgroundColor !== thumbnailSheetSurface);
-
             context.fillStyle = gradientFill ?? fillColor;
             context.fillRect(rect.left, rect.top, rect.width, rect.height);
 
@@ -16337,7 +16326,7 @@ export function useXlsxViewerThumbnails(
               }
             }
 
-            if (showGridLines && !hasExplicitCellFill) {
+            if (showGridLines) {
               context.strokeStyle = palette.border;
               context.lineWidth = 1;
               context.beginPath();
