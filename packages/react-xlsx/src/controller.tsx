@@ -1,5 +1,10 @@
 import * as React from "react";
-import type { Workbook } from "@dukelib/sheets-wasm";
+import type {
+  FormControl as DukeFormControl,
+  FormControlKind as DukeFormControlKind,
+  FormControlInput as DukeFormControlInput,
+  Workbook
+} from "@dukelib/sheets-wasm";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import {
   applyChartSeriesFormula,
@@ -11,10 +16,12 @@ import {
 } from "./charts";
 import { resolveWorkbookColor, resolveWorkbookFillStyle } from "./colors";
 import {
+  collectWorkbookFormControls,
   mergeWorkbookImageAssets,
   parseWorkbookImageAssets,
   pxToSheetColumnWidth,
   rectToImageAnchor,
+  refreshWorkbookFormControls,
   resolveContentSheetAxisPixels,
   resolveWorksheetDefaultColumnWidthPixels,
   resolveWorksheetDefaultRowHeightPixels,
@@ -45,6 +52,8 @@ import type {
   XlsxConditionalFormatRule,
   XlsxDataValidation,
   XlsxFormControl,
+  XlsxFormControlInput,
+  XlsxFormControlPatch,
   XlsxFreezePanes,
   XlsxImage,
   XlsxImageRect,
@@ -830,6 +839,188 @@ function parseA1RangeReference(reference: string): XlsxCellRange | null {
   }
 
   return normalizeRange({ start, end });
+}
+
+type ResolvedWorkbookReference = {
+  range: XlsxCellRange;
+  workbookSheetIndex: number;
+  worksheet: ReturnType<Workbook["getSheet"]>;
+};
+
+function resolveWorkbookReference(
+  workbook: Workbook,
+  defaultWorkbookSheetIndex: number,
+  rawReference: string,
+  resolvingNamedRange = false
+): ResolvedWorkbookReference | null {
+  const reference = rawReference.trim().replace(/^=/, "");
+  if (!reference) {
+    return null;
+  }
+
+  let workbookSheetIndex = defaultWorkbookSheetIndex;
+  let rangeReference = reference;
+  const bangIndex = reference.lastIndexOf("!");
+  if (bangIndex >= 0) {
+    let sheetName = reference.slice(0, bangIndex).trim();
+    rangeReference = reference.slice(bangIndex + 1).trim();
+    if (sheetName.startsWith("'") && sheetName.endsWith("'")) {
+      sheetName = sheetName.slice(1, -1).replace(/''/g, "'");
+    }
+    const resolvedSheetIndex = workbook.sheetIndex(sheetName);
+    if (resolvedSheetIndex === undefined) {
+      return null;
+    }
+    workbookSheetIndex = resolvedSheetIndex;
+  } else if (!resolvingNamedRange) {
+    const namedRange = workbook.getNamedRange(reference);
+    if (namedRange) {
+      return resolveWorkbookReference(workbook, defaultWorkbookSheetIndex, namedRange, true);
+    }
+  }
+
+  const range = parseA1RangeReference(rangeReference.replace(/\$/g, ""));
+  if (!range || workbookSheetIndex < 0 || workbookSheetIndex >= workbook.sheetCount) {
+    return null;
+  }
+
+  try {
+    return {
+      range,
+      workbookSheetIndex,
+      worksheet: workbook.getSheet(workbookSheetIndex)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formControlInputFromDukeControl(control: DukeFormControl): DukeFormControlInput {
+  return {
+    anchor: { ...control.anchor },
+    kind: { ...control.kind },
+    locked: control.locked,
+    name: control.name,
+    printable: control.printable
+  };
+}
+
+function getFormControlCellLink(kind: DukeFormControlKind) {
+  return "cellLink" in kind ? kind.cellLink : undefined;
+}
+
+function anchorContainsControl(group: DukeFormControl, control: DukeFormControl) {
+  const groupAnchor = group.anchor;
+  const controlAnchor = control.anchor;
+  return (
+    controlAnchor.fromCol >= groupAnchor.fromCol &&
+    controlAnchor.fromCol <= groupAnchor.toCol &&
+    controlAnchor.fromRow >= groupAnchor.fromRow &&
+    controlAnchor.fromRow <= groupAnchor.toRow
+  );
+}
+
+function resolveOptionButtonGroupIndexes(controls: DukeFormControl[], targetIndex: number) {
+  const target = controls[targetIndex];
+  if (!target || target.kind.kind !== "optionButton") {
+    return [];
+  }
+
+  if (target.kind.cellLink) {
+    const targetCellLink = target.kind.cellLink;
+    return controls.flatMap((control, index) => (
+      control.kind.kind === "optionButton" && control.kind.cellLink === targetCellLink ? [index] : []
+    ));
+  }
+
+  const containingGroups = controls
+    .map((control, index) => ({ control, index }))
+    .filter(({ control }) => control.kind.kind === "groupBox" && anchorContainsControl(control, target))
+    .sort((left, right) => {
+      const leftArea = (left.control.anchor.toCol - left.control.anchor.fromCol) * (left.control.anchor.toRow - left.control.anchor.fromRow);
+      const rightArea = (right.control.anchor.toCol - right.control.anchor.fromCol) * (right.control.anchor.toRow - right.control.anchor.fromRow);
+      return leftArea - rightArea;
+    });
+  const containingGroup = containingGroups[0]?.control;
+  if (containingGroup) {
+    return controls.flatMap((control, index) => (
+      control.kind.kind === "optionButton" && anchorContainsControl(containingGroup, control) ? [index] : []
+    ));
+  }
+
+  const optionIndexes = controls.flatMap((control, index) => control.kind.kind === "optionButton" ? [index] : []);
+  const targetPosition = optionIndexes.indexOf(targetIndex);
+  if (targetPosition < 0) {
+    return [];
+  }
+  let startPosition = targetPosition;
+  while (startPosition > 0) {
+    const control = controls[optionIndexes[startPosition] ?? -1];
+    if (control?.kind.kind === "optionButton" && control.kind.firstInGroup) {
+      break;
+    }
+    startPosition -= 1;
+  }
+  let endPosition = targetPosition + 1;
+  while (endPosition < optionIndexes.length) {
+    const control = controls[optionIndexes[endPosition] ?? -1];
+    if (control?.kind.kind === "optionButton" && control.kind.firstInGroup) {
+      break;
+    }
+    endPosition += 1;
+  }
+  return optionIndexes.slice(startPosition, endPosition);
+}
+
+function resolveLinkedCellValue(controls: DukeFormControl[], controlIndex: number) {
+  const control = controls[controlIndex];
+  if (!control) {
+    return undefined;
+  }
+
+  switch (control.kind.kind) {
+    case "checkbox":
+      return control.kind.state === "mixed" ? "#N/A" : control.kind.state === "checked";
+    case "optionButton": {
+      const groupIndexes = resolveOptionButtonGroupIndexes(controls, controlIndex);
+      const checkedIndex = groupIndexes.find((index) => controls[index]?.kind.kind === "optionButton" && controls[index]?.kind.state === "checked");
+      const groupPosition = checkedIndex === undefined ? -1 : groupIndexes.indexOf(checkedIndex);
+      return groupPosition >= 0 ? groupPosition + 1 : "";
+    }
+    case "dropdown":
+      return control.kind.selected === undefined ? "" : control.kind.selected + 1;
+    case "listBox":
+      return control.kind.selection === "single" && control.kind.selected.length === 1
+        ? (control.kind.selected[0] ?? -1) + 1
+        : "";
+    case "scrollbar":
+    case "spinner":
+      return control.kind.value;
+    default:
+      return undefined;
+  }
+}
+
+function syncFormControlLinkedCell(
+  workbook: Workbook,
+  workbookSheetIndex: number,
+  controls: DukeFormControl[],
+  controlIndex: number
+) {
+  const control = controls[controlIndex];
+  if (!control) {
+    return;
+  }
+  const cellLink = getFormControlCellLink(control.kind);
+  const value = resolveLinkedCellValue(controls, controlIndex);
+  if (!cellLink || value === undefined) {
+    return;
+  }
+  const target = resolveWorkbookReference(workbook, workbookSheetIndex, cellLink);
+  if (!target || target.range.start.row !== target.range.end.row || target.range.start.col !== target.range.end.col) {
+    return;
+  }
+  target.worksheet.setCell(cellAddressToA1(target.range.start), value);
 }
 
 function parseWorksheetFreezePanes(worksheet: ReturnType<Workbook["getSheet"]>): XlsxFreezePanes | null {
@@ -1810,7 +2001,7 @@ function createBasicWorkbookAssets(workbook: Workbook): WorkbookImageAssets {
   const objectUrls: string[] = [];
   return {
     archive: {},
-    formControlsByWorkbookSheetIndex: Array.from({ length: workbook.sheetCount }, () => [] as XlsxFormControl[]),
+    formControlsByWorkbookSheetIndex: collectWorkbookFormControls(workbook),
     imageOriginsById: new Map(),
     imagesByWorkbookSheetIndex: collectWorksheetApiImages(workbook, objectUrls),
     namedCellStyleByName: {},
@@ -1830,7 +2021,7 @@ function loadWorkbookImageAssets(bytes: Uint8Array, workbook: Workbook, skipXmlP
     return createBasicWorkbookAssets(workbook);
   }
 
-  const parsedAssets = parseWorkbookImageAssets(bytes);
+  const parsedAssets = parseWorkbookImageAssets(bytes, workbook);
   const apiImagesByWorkbookSheetIndex = collectWorksheetApiImages(workbook, parsedAssets.objectUrls);
 
   const imagesByWorkbookSheetIndex = Array.from(
@@ -2209,6 +2400,12 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
   }, [skipXmlParsing]);
 
   const refreshWorkbookState = React.useCallback((targetWorkbook: Workbook) => {
+    const currentFormControls = imageAssetsRef.current?.formControlsByWorkbookSheetIndex ?? [];
+    const nextFormControls = refreshWorkbookFormControls(targetWorkbook, currentFormControls);
+    if (imageAssetsRef.current) {
+      imageAssetsRef.current.formControlsByWorkbookSheetIndex = nextFormControls;
+    }
+    setFormControlsByWorkbookSheetIndex(nextFormControls);
     const nextSheets = buildSheetList(
       targetWorkbook,
       imageAssetsRef.current?.sheetStatesByWorkbookSheetIndex,
@@ -2347,6 +2544,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
             setChartsheets(snapshot.chartsheets);
             setTabs(snapshot.tabs);
             chartAssetsRef.current = null;
+            setFormControlsByWorkbookSheetIndex(snapshot.formControlsByWorkbookSheetIndex);
             setWorkerTablesByWorkbookSheetIndex(snapshot.tablesByWorkbookSheetIndex);
             setShouldAutoCalculate(false);
             setIsWorkerBacked(true);
@@ -2593,6 +2791,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
           setChartsheets(snapshot.chartsheets);
           setTabs(snapshot.tabs);
           chartAssetsRef.current = null;
+          setFormControlsByWorkbookSheetIndex(snapshot.formControlsByWorkbookSheetIndex);
           setWorkerTablesByWorkbookSheetIndex(snapshot.tablesByWorkbookSheetIndex);
           setShouldAutoCalculate(false);
           setIsWorkerBacked(true);
@@ -2724,6 +2923,21 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
 
     return workbook.getSheet(activeSheet.workbookSheetIndex);
   }, [activeSheet, workbook]);
+
+  const getFormControlWorksheet = React.useCallback((sheetIndex = activeSheetIndex) => {
+    const targetSheet = sheets[sheetIndex];
+    if (!workbook || !targetSheet) {
+      return null;
+    }
+    try {
+      return {
+        workbookSheetIndex: targetSheet.workbookSheetIndex,
+        worksheet: workbook.getSheet(targetSheet.workbookSheetIndex)
+      };
+    } catch {
+      return null;
+    }
+  }, [activeSheetIndex, sheets, workbook]);
 
   const tables = React.useMemo(
     () => (
@@ -2901,6 +3115,32 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
   }, [activeSheetIndex, formControlsByWorkbookSheetIndex, mapPublicFormControl, sheets]);
 
   const formControls = React.useMemo(() => getSheetFormControls(activeSheetIndex), [activeSheetIndex, getSheetFormControls]);
+
+  const getFormControlItems = React.useCallback((controlIndex: number, sheetIndex = activeSheetIndex) => {
+    const target = getFormControlWorksheet(sheetIndex);
+    if (!workbook || !target) {
+      return [];
+    }
+    const control = target.worksheet.formControls[controlIndex];
+    const inputRange = control?.kind.kind === "listBox" || control?.kind.kind === "dropdown"
+      ? control.kind.inputRange
+      : undefined;
+    if (!inputRange) {
+      return [];
+    }
+    const source = resolveWorkbookReference(workbook, target.workbookSheetIndex, inputRange);
+    if (!source) {
+      return [];
+    }
+
+    const items: string[] = [];
+    for (let row = source.range.start.row; row <= source.range.end.row; row += 1) {
+      for (let col = source.range.start.col; col <= source.range.end.col; col += 1) {
+        items.push(source.worksheet.getFormattedValueAt(row, col));
+      }
+    }
+    return items;
+  }, [activeSheetIndex, getFormControlWorksheet, workbook]);
 
   const getSheetShapes = React.useCallback((sheetIndex = activeSheetIndex) => {
     const targetSheet = sheets[sheetIndex];
@@ -3379,6 +3619,101 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
     redoStackRef.current = [];
     setHistoryRevision((current) => current + 1);
   }, [createHistoryEntry]);
+
+  const addFormControl = React.useCallback((input: XlsxFormControlInput, sheetIndex = activeSheetIndex) => {
+    const target = getFormControlWorksheet(sheetIndex);
+    if (readOnly || !workbook || !target) {
+      return null;
+    }
+
+    recordHistoryBeforeMutation();
+    const controlIndex = target.worksheet.addFormControl(input as DukeFormControlInput);
+    const controls = target.worksheet.formControls;
+    const addedControl = controls[controlIndex];
+    if (addedControl?.kind.kind === "optionButton" && addedControl.kind.state === "checked") {
+      const groupIndexes = resolveOptionButtonGroupIndexes(controls, controlIndex);
+      for (const siblingIndex of groupIndexes) {
+        if (siblingIndex === controlIndex) {
+          continue;
+        }
+        const sibling = target.worksheet.formControls[siblingIndex];
+        if (sibling?.kind.kind === "optionButton" && sibling.kind.state !== "unchecked") {
+          target.worksheet.setFormControl(siblingIndex, {
+            ...formControlInputFromDukeControl(sibling),
+            kind: { ...sibling.kind, state: "unchecked" }
+          });
+        }
+      }
+    }
+    syncFormControlLinkedCell(
+      workbook,
+      target.workbookSheetIndex,
+      target.worksheet.formControls,
+      controlIndex
+    );
+    maybeRecalculateWorkbook(workbook);
+    refreshWorkbookState(workbook);
+    return controlIndex;
+  }, [activeSheetIndex, getFormControlWorksheet, maybeRecalculateWorkbook, readOnly, recordHistoryBeforeMutation, refreshWorkbookState, workbook]);
+
+  const updateFormControl = React.useCallback((
+    controlIndex: number,
+    patch: XlsxFormControlPatch,
+    sheetIndex = activeSheetIndex
+  ) => {
+    const target = getFormControlWorksheet(sheetIndex);
+    const currentControl = target?.worksheet.formControls[controlIndex];
+    if (readOnly || !workbook || !target || !currentControl) {
+      return false;
+    }
+
+    recordHistoryBeforeMutation();
+    const nextInput: DukeFormControlInput = {
+      ...formControlInputFromDukeControl(currentControl),
+      ...patch,
+      anchor: patch.anchor ? { ...patch.anchor } : { ...currentControl.anchor },
+      kind: patch.kind ? { ...patch.kind } : { ...currentControl.kind }
+    } as DukeFormControlInput;
+
+    if (nextInput.kind.kind === "optionButton" && nextInput.kind.state === "checked") {
+      const groupIndexes = resolveOptionButtonGroupIndexes(target.worksheet.formControls, controlIndex);
+      for (const siblingIndex of groupIndexes) {
+        if (siblingIndex === controlIndex) {
+          continue;
+        }
+        const sibling = target.worksheet.formControls[siblingIndex];
+        if (sibling?.kind.kind === "optionButton" && sibling.kind.state !== "unchecked") {
+          target.worksheet.setFormControl(siblingIndex, {
+            ...formControlInputFromDukeControl(sibling),
+            kind: { ...sibling.kind, state: "unchecked" }
+          });
+        }
+      }
+    }
+
+    target.worksheet.setFormControl(controlIndex, nextInput);
+    syncFormControlLinkedCell(
+      workbook,
+      target.workbookSheetIndex,
+      target.worksheet.formControls,
+      controlIndex
+    );
+    maybeRecalculateWorkbook(workbook);
+    refreshWorkbookState(workbook);
+    return true;
+  }, [activeSheetIndex, getFormControlWorksheet, maybeRecalculateWorkbook, readOnly, recordHistoryBeforeMutation, refreshWorkbookState, workbook]);
+
+  const removeFormControl = React.useCallback((controlIndex: number, sheetIndex = activeSheetIndex) => {
+    const target = getFormControlWorksheet(sheetIndex);
+    if (readOnly || !workbook || !target || !target.worksheet.formControls[controlIndex]) {
+      return false;
+    }
+
+    recordHistoryBeforeMutation();
+    target.worksheet.removeFormControl(controlIndex);
+    refreshWorkbookState(workbook);
+    return true;
+  }, [activeSheetIndex, getFormControlWorksheet, readOnly, recordHistoryBeforeMutation, refreshWorkbookState, workbook]);
 
   const recordCellEditHistory = React.useCallback((
     cell: XlsxCellAddress,
@@ -4385,8 +4720,15 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
 
     workbook.addSheet(candidate);
     sheetOriginsRef.current = [...sheetOriginsRef.current, null];
+    setFormControlsByWorkbookSheetIndex((current) => [...current, []]);
     setImagesByWorkbookSheetIndex((current) => [...current, []]);
     setShapesByWorkbookSheetIndex((current) => [...current, []]);
+    if (imageAssetsRef.current) {
+      imageAssetsRef.current.formControlsByWorkbookSheetIndex = [
+        ...imageAssetsRef.current.formControlsByWorkbookSheetIndex,
+        []
+      ];
+    }
     const nextSheets = buildSheetList(
       workbook,
       imageAssetsRef.current?.sheetStatesByWorkbookSheetIndex,
@@ -4420,9 +4762,13 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
     recordHistoryBeforeMutation();
     workbook.removeSheet(activeSheet.workbookSheetIndex);
     sheetOriginsRef.current = sheetOriginsRef.current.filter((_, index) => index !== activeSheet.workbookSheetIndex);
+    setFormControlsByWorkbookSheetIndex((current) => current.filter((_, index) => index !== activeSheet.workbookSheetIndex));
     setImagesByWorkbookSheetIndex((current) => current.filter((_, index) => index !== activeSheet.workbookSheetIndex));
     setShapesByWorkbookSheetIndex((current) => current.filter((_, index) => index !== activeSheet.workbookSheetIndex));
     if (imageAssetsRef.current) {
+      imageAssetsRef.current.formControlsByWorkbookSheetIndex = imageAssetsRef.current.formControlsByWorkbookSheetIndex.filter(
+        (_, index) => index !== activeSheet.workbookSheetIndex
+      );
       imageAssetsRef.current.sheetStatesByWorkbookSheetIndex = imageAssetsRef.current.sheetStatesByWorkbookSheetIndex.filter(
         (_, index) => index !== activeSheet.workbookSheetIndex
       );
@@ -4757,6 +5103,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       activeSheetIndex,
       activeTab,
       activeTabIndex,
+      addFormControl,
       addSheet,
       canRedo,
       canDownload: Boolean(file ?? src),
@@ -4796,6 +5143,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       getClipboardData,
       getCellDisplayValue,
       getCellFormula,
+      getFormControlItems,
       getCellSnapshotAsync: isWorkerBacked ? getCellSnapshotAsync : undefined,
       getActiveWorksheet,
       getRowsBatchAsync: isWorkerBacked ? getRowsBatchAsync : undefined,
@@ -4813,6 +5161,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       pasteStructuredClipboardData,
       pasteText,
       removeActiveSheet,
+      removeFormControl,
       readOnly,
       recalculate,
       redo,
@@ -4863,6 +5212,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       undo,
       unmergeSelection,
       updateChart,
+      updateFormControl,
       workbook,
       zoomIn,
       zoomOut,
@@ -4875,6 +5225,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       activeSheetIndex,
       activeTab,
       activeTabIndex,
+      addFormControl,
       addSheet,
       canLoadDeferred,
       canRedo,
@@ -4911,6 +5262,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       getClipboardData,
       getCellDisplayValue,
       getCellFormula,
+      getFormControlItems,
       getCellSnapshotAsync,
       getActiveWorksheet,
       historyRevision,
@@ -4928,6 +5280,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       pasteStructuredClipboardData,
       pasteText,
       removeActiveSheet,
+      removeFormControl,
       readOnly,
       recalculate,
       redo,
@@ -4978,6 +5331,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       undo,
       unmergeSelection,
       updateChart,
+      updateFormControl,
       workbook,
       zoomIn,
       zoomOut,

@@ -231,6 +231,26 @@ These hooks work inside `XlsxViewer` or `XlsxViewerProvider` context.
 - `useXlsxViewerCharts()` for chart, chart element, formula, and chartsheet state
 - `useXlsxViewerThumbnails(options)` for painting worksheet thumbnails into your own canvases
 
+## Form Control Editing
+
+When `readOnly={false}`, Duke-backed checkboxes, option buttons, dropdowns, list boxes, scrollbars, and spinners are interactive. Changes update linked cells immediately, participate in undo/redo, and are written by `exportXlsx()` / `download()`.
+
+Buttons do not execute Excel macros. Provide `onFormControlAction` to handle a button activation in your application. Labels and group boxes are display-only, and legacy edit boxes remain render-only because Duke Sheets does not expose them as editable form controls.
+
+```tsx
+<XlsxViewer
+  file={file}
+  onFormControlAction={({ control }) => {
+    console.log("Activated", control.name);
+  }}
+  onFormControlChange={({ control, previousControl }) => {
+    console.log(previousControl.state, "->", control.state);
+  }}
+/>
+```
+
+The controller also exposes `addFormControl(input, sheetIndex?)`, `updateFormControl(controlIndex, patch, sheetIndex?)`, `removeFormControl(controlIndex, sheetIndex?)`, and `getFormControlItems(controlIndex, sheetIndex?)`. Inputs use Duke's flat two-cell anchor and kind-specific form-control shape, exported as `XlsxFormControlInput` and related types.
+
 ## Chart Selection And Formulas
 
 Chart interactions follow Excel's selection progression: clicking a chart selects the chart frame, clicking a plotted item or legend entry again selects the series, and clicking an item in an already-selected series selects that point. `selectedChartElement` exposes the current chart, series, legend entry, or point selection through the controller and `useXlsxViewerCharts()`.

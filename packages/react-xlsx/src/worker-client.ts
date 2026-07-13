@@ -1,4 +1,4 @@
-import type { XlsxChart, XlsxChartsheet, XlsxSheetData, XlsxTable, XlsxWorkbookTab } from "./types";
+import type { XlsxChart, XlsxChartsheet, XlsxFormControl, XlsxSheetData, XlsxTable, XlsxWorkbookTab } from "./types";
 import { getConfiguredWorkerWasmSource, type WorkerWasmSource } from "./wasm";
 
 type WorkerMessage =
@@ -57,6 +57,7 @@ type WorkerSuccessMessage =
       result: {
         chartsByWorkbookSheetIndex: XlsxChart[][];
         chartsheets: XlsxChartsheet[];
+        formControlsByWorkbookSheetIndex: XlsxFormControl[][];
         sheets: XlsxSheetData[];
         tablesByWorkbookSheetIndex: XlsxTable[][];
         tabs: XlsxWorkbookTab[];
@@ -135,6 +136,7 @@ export class XlsxWorkerClient {
     return this.request<{
       chartsByWorkbookSheetIndex: XlsxChart[][];
       chartsheets: XlsxChartsheet[];
+      formControlsByWorkbookSheetIndex: XlsxFormControl[][];
       sheets: XlsxSheetData[];
       tablesByWorkbookSheetIndex: XlsxTable[][];
       tabs: XlsxWorkbookTab[];

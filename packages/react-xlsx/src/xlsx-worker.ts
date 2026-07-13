@@ -2,6 +2,7 @@ import type { Workbook } from "@dukelib/sheets-wasm";
 import { strFromU8, unzipSync } from "fflate";
 import { loadWorkbookChartAssets } from "./charts";
 import {
+  collectWorkbookFormControls,
   parseWorkbookChartStyleAssets,
   parseWorkbookStructureAssets,
   resolveSheetColumnWidthPixels,
@@ -18,6 +19,7 @@ import type {
   XlsxCellAddress,
   XlsxCellRange,
   XlsxDataValidation,
+  XlsxFormControl,
   XlsxFreezePanes,
   XlsxResolvedCellStyle,
   XlsxSheetData,
@@ -108,6 +110,7 @@ type WorkerSuccessResponse = {
     | {
         chartsByWorkbookSheetIndex: XlsxChart[][];
         chartsheets: XlsxChartsheet[];
+        formControlsByWorkbookSheetIndex: XlsxFormControl[][];
         sheets: XlsxSheetData[];
         tablesByWorkbookSheetIndex: XlsxTable[][];
         tabs: XlsxWorkbookTab[];
@@ -131,6 +134,7 @@ type WorkerResponse = WorkerSuccessResponse | WorkerErrorResponse;
 let workbook: Workbook | null = null;
 let chartsByWorkbookSheetIndex: XlsxChart[][] = [];
 let chartsheets: XlsxChartsheet[] = [];
+let formControlsByWorkbookSheetIndex: XlsxFormControl[][] = [];
 let sheets: XlsxSheetData[] = [];
 let tablesByWorkbookSheetIndex: XlsxTable[][] = [];
 let tabs: XlsxWorkbookTab[] = [];
@@ -682,6 +686,7 @@ async function loadWorkbook(buffer: ArrayBuffer, skipXmlParsing = false, showHid
   }
 
   const nextWorkbook = activeWorkbook;
+  formControlsByWorkbookSheetIndex = collectWorkbookFormControls(nextWorkbook);
   const shouldUseFastStructureParse =
     bytes.byteLength >= FAST_STRUCTURE_PARSE_THRESHOLD_BYTES && totalFormulas <= FORMULA_COUNT_THRESHOLD;
   const structureAssets = effectiveSkipXmlParsing || shouldUseFastStructureParse || !canParseXmlInWorker()
@@ -717,6 +722,7 @@ async function loadWorkbook(buffer: ArrayBuffer, skipXmlParsing = false, showHid
   return {
     chartsByWorkbookSheetIndex,
     chartsheets,
+    formControlsByWorkbookSheetIndex,
     sheets,
     tablesByWorkbookSheetIndex,
     tabs

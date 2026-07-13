@@ -496,22 +496,100 @@ export type XlsxFormControlKind =
   | "spinner"
   | "unknown";
 
+export type XlsxFormControlState = "unchecked" | "checked" | "mixed";
+
+export type XlsxFormControlSelectionMode = "single" | "multi" | "extend";
+
+/** Duke Sheets' flat worksheet anchor used when creating or updating form controls. */
+export interface XlsxFormControlAnchor {
+  editAs: "twoCell" | "oneCell" | "absolute";
+  fromCol: number;
+  fromColOffset: number;
+  fromRow: number;
+  fromRowOffset: number;
+  toCol: number;
+  toColOffset: number;
+  toRow: number;
+  toRowOffset: number;
+}
+
+/** Kind-specific input accepted by Duke Sheets for form-control mutations. */
+export type XlsxFormControlKindInput =
+  | { kind: "button"; caption: string }
+  | { kind: "checkbox"; caption: string; state: XlsxFormControlState; cellLink?: string; no3D: boolean }
+  | { kind: "optionButton"; caption: string; state: Exclude<XlsxFormControlState, "mixed">; cellLink?: string; firstInGroup?: boolean; no3D: boolean }
+  | { kind: "label"; caption: string }
+  | { kind: "groupBox"; caption: string; no3D: boolean }
+  | { kind: "listBox"; inputRange?: string; cellLink?: string; selection: XlsxFormControlSelectionMode; selected: number[]; no3D: boolean }
+  | { kind: "dropdown"; inputRange?: string; cellLink?: string; selected?: number; lines: number; no3D: boolean }
+  | { kind: "scrollbar"; value: number; min: number; max: number; increment: number; page: number; horizontal: boolean; cellLink?: string }
+  | { kind: "spinner"; value: number; min: number; max: number; increment: number; cellLink?: string };
+
+/** Complete Duke Sheets input for adding a worksheet form control. */
+export interface XlsxFormControlInput {
+  anchor: XlsxFormControlAnchor;
+  kind: XlsxFormControlKindInput;
+  locked?: boolean;
+  name?: string;
+  printable?: boolean;
+}
+
+/** Partial Duke Sheets input for changing an existing worksheet form control. */
+export type XlsxFormControlPatch = Partial<Omit<XlsxFormControlInput, "kind">> & {
+  kind?: XlsxFormControlKindInput;
+};
+
 export interface XlsxFormControl {
   anchor: XlsxImageAnchor;
+  /** Original Excel caption reported by Duke Sheets. */
+  caption?: string;
   checked?: boolean;
+  /** Duke Sheets' stable zero-based index for this worksheet load. */
+  controlIndex?: number;
+  /** Original anchor behavior when Duke has flattened the anchor to two-cell coordinates. */
+  editAs?: "twoCell" | "oneCell" | "absolute";
+  /** Exact Duke Sheets anchor. Use this when cloning or updating the control through the controller. */
+  dukeAnchor?: XlsxFormControlAnchor;
+  firstInGroup?: boolean;
   fontFamily?: string;
   fontSizePt?: number;
   hidden?: boolean;
+  horizontal?: boolean;
   id: string;
+  increment?: number;
+  inputRange?: string;
   kind: XlsxFormControlKind;
   label?: string;
+  lines?: number;
   linkedCell?: string;
+  locked?: boolean;
+  max?: number;
+  min?: number;
   name?: string;
+  no3D?: boolean;
+  page?: number;
+  printable?: boolean;
+  /** Zero-based selected item index or indexes, matching Duke Sheets. */
+  selected?: number | number[];
+  selection?: XlsxFormControlSelectionMode;
   sheetIndex: number;
+  state?: XlsxFormControlState;
   textAlign?: "center" | "left" | "right";
   textColor?: string;
+  value?: number;
   workbookSheetIndex: number;
   zIndex: number;
+}
+
+export interface XlsxFormControlActionEvent {
+  control: XlsxFormControl;
+  type: "activate";
+}
+
+export interface XlsxFormControlChangeEvent {
+  control: XlsxFormControl;
+  previousControl: XlsxFormControl;
+  type: "change";
 }
 
 export interface XlsxChartReference {
@@ -893,6 +971,8 @@ export interface XlsxViewerController {
   canUndo: boolean;
   canZoomIn: boolean;
   canZoomOut: boolean;
+  /** Adds a Duke-supported form control to a visible worksheet and returns its worksheet-local index. */
+  addFormControl: (input: XlsxFormControlInput, sheetIndex?: number) => number | null;
   clearSelectedCells: () => void;
   clearSelection: () => void;
   continueDeferredLoad: () => void;
@@ -918,6 +998,8 @@ export interface XlsxViewerController {
   formControls: XlsxFormControl[];
   getSheetCharts: (sheetIndex?: number) => XlsxChart[];
   getSheetFormControls: (sheetIndex?: number) => XlsxFormControl[];
+  /** Resolves a list/dropdown input range to its current formatted item labels. */
+  getFormControlItems: (controlIndex: number, sheetIndex?: number) => string[];
   getImageById: (id: string) => XlsxImage | null;
   getSheetImages: (sheetIndex?: number) => XlsxImage[];
   getSheetShapes: (sheetIndex?: number) => XlsxShape[];
@@ -940,6 +1022,8 @@ export interface XlsxViewerController {
   minZoomScale: number;
   moveImageBy: (id: string, deltaX: number, deltaY: number) => void;
   removeActiveSheet: () => void;
+  /** Removes a Duke-supported control by its worksheet-local index. */
+  removeFormControl: (controlIndex: number, sheetIndex?: number) => boolean;
   readOnly: boolean;
   recalculate: () => void;
   revision: number;
@@ -1050,6 +1134,8 @@ export interface XlsxViewerController {
   undo: () => void;
   unmergeSelection: () => void;
   updateChart: (id: string, patch: Partial<XlsxChart>) => void;
+  /** Updates a Duke-supported control and participates in undo/redo and export. */
+  updateFormControl: (controlIndex: number, patch: XlsxFormControlPatch, sheetIndex?: number) => boolean;
   workbook: Workbook | null;
   zoomIn: () => void;
   zoomOut: () => void;
@@ -1083,20 +1169,25 @@ export interface XlsxViewerZoom {
 
 export interface XlsxViewerEditing {
   addSheet: (name?: string) => void;
+  addFormControl: (input: XlsxFormControlInput, sheetIndex?: number) => number | null;
   canRedo: boolean;
   canUndo: boolean;
   clearSelectedCells: () => void;
   copySelectionToClipboard: () => Promise<boolean>;
   defineNamedRange: (name: string, range?: XlsxCellRange | null) => void;
   fillSelection: (targetRange: XlsxCellRange) => void;
+  formControls: XlsxFormControl[];
   getClipboardData: () => XlsxClipboardData | null;
   getCellDisplayValue: (cell?: XlsxCellAddress | null) => string;
   getCellFormula: (cell?: XlsxCellAddress | null) => string;
+  getFormControlItems: (controlIndex: number, sheetIndex?: number) => string[];
+  getSheetFormControls: (sheetIndex?: number) => XlsxFormControl[];
   mergeSelection: () => void;
   pasteFromClipboard: () => Promise<boolean>;
   pasteStructuredClipboardData: (payload: string) => boolean;
   pasteText: (text: string) => boolean;
   removeActiveSheet: () => void;
+  removeFormControl: (controlIndex: number, sheetIndex?: number) => boolean;
   readOnly: boolean;
   redo: () => void;
   selectedCellFormula: string;
@@ -1146,6 +1237,7 @@ export interface XlsxViewerEditing {
   setSelectedCellValue: (value: string) => void;
   undo: () => void;
   unmergeSelection: () => void;
+  updateFormControl: (controlIndex: number, patch: XlsxFormControlPatch, sheetIndex?: number) => boolean;
 }
 
 export interface XlsxViewerTables {
@@ -1421,6 +1513,10 @@ export interface XlsxViewerProps extends UseXlsxViewerControllerOptions {
   loadingComponent?: React.ReactElement;
   /** Content shown while the workbook is being parsed. */
   loadingState?: React.ReactNode;
+  /** Called when an editable button form control is activated. Duke preserves buttons but does not execute macros. */
+  onFormControlAction?: (event: XlsxFormControlActionEvent) => void;
+  /** Called after the built-in editor persists a checkbox, radio, list, dropdown, scrollbar, or spinner change. */
+  onFormControlChange?: (event: XlsxFormControlChangeEvent) => void;
   /** Replaces the chart loading placeholder. */
   renderChartLoading?: (props: XlsxChartLoadingRenderProps) => React.ReactNode;
   /**

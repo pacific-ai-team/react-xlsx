@@ -1,4 +1,9 @@
-import type { Workbook } from "@dukelib/sheets-wasm";
+import type {
+  FormControl as DukeFormControl,
+  FormControlAnchor as DukeFormControlAnchor,
+  FormControlKind as DukeFormControlKind,
+  Workbook
+} from "@dukelib/sheets-wasm";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { resolveWorkbookColor } from "./colors";
 import type {
@@ -26,7 +31,6 @@ const SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/mai
 const CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types";
 const DRAWING_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing";
 const VML_DRAWING_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing";
-const CTRL_PROP_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/ctrlProp";
 const IMAGE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
 const HYPERLINK_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
 const DRAWING_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.drawing+xml";
@@ -301,15 +305,8 @@ type WorkbookImageOrigin = {
 
 type ParsedSheetFormControl = {
   anchor: XlsxFormControl["anchor"] | null;
-  controlRelationshipId: string | null;
   name?: string;
   shapeId: number | null;
-};
-
-type ParsedCtrlProp = {
-  checked?: boolean;
-  linkedCell?: string;
-  objectType?: string;
 };
 
 type ParsedVmlFormControl = {
@@ -1989,6 +1986,136 @@ function parseSpreadsheetBooleanNode(node: Element | null) {
   return parseSpreadsheetBooleanValue(node.getAttribute("val") ?? node.textContent);
 }
 
+function mapDukeFormControlAnchor(anchor: DukeFormControlAnchor): XlsxFormControl["anchor"] {
+  return {
+    from: {
+      col: anchor.fromCol,
+      colOffsetEmu: anchor.fromColOffset,
+      row: anchor.fromRow,
+      rowOffsetEmu: anchor.fromRowOffset
+    },
+    kind: "two-cell",
+    to: {
+      col: anchor.toCol,
+      colOffsetEmu: anchor.toColOffset,
+      row: anchor.toRow,
+      rowOffsetEmu: anchor.toRowOffset
+    }
+  };
+}
+
+function mapDukeFormControlKind(
+  kind: DukeFormControlKind
+): Pick<XlsxFormControl, "kind"> & Partial<XlsxFormControl> {
+  switch (kind.kind) {
+    case "button":
+      return { caption: kind.caption, kind: "button", label: normalizeControlLabel(kind.caption) };
+    case "checkbox":
+      return {
+        caption: kind.caption,
+        checked: kind.state === "checked",
+        kind: "checkbox",
+        label: normalizeControlLabel(kind.caption),
+        linkedCell: kind.cellLink,
+        no3D: kind.no3D,
+        state: kind.state
+      };
+    case "optionButton":
+      return {
+        caption: kind.caption,
+        checked: kind.state === "checked",
+        firstInGroup: kind.firstInGroup,
+        kind: "radio",
+        label: normalizeControlLabel(kind.caption),
+        linkedCell: kind.cellLink,
+        no3D: kind.no3D,
+        state: kind.state
+      };
+    case "label":
+      return { caption: kind.caption, kind: "label", label: normalizeControlLabel(kind.caption) };
+    case "groupBox":
+      return {
+        caption: kind.caption,
+        kind: "group-box",
+        label: normalizeControlLabel(kind.caption),
+        no3D: kind.no3D
+      };
+    case "listBox":
+      return {
+        inputRange: kind.inputRange,
+        kind: "listbox",
+        linkedCell: kind.cellLink,
+        no3D: kind.no3D,
+        selected: [...kind.selected],
+        selection: kind.selection
+      };
+    case "dropdown":
+      return {
+        inputRange: kind.inputRange,
+        kind: "dropdown",
+        lines: kind.lines,
+        linkedCell: kind.cellLink,
+        no3D: kind.no3D,
+        selected: kind.selected
+      };
+    case "scrollbar":
+      return {
+        horizontal: kind.horizontal,
+        increment: kind.increment,
+        kind: "scrollbar",
+        linkedCell: kind.cellLink,
+        max: kind.max,
+        min: kind.min,
+        page: kind.page,
+        value: kind.value
+      };
+    case "spinner":
+      return {
+        increment: kind.increment,
+        kind: "spinner",
+        linkedCell: kind.cellLink,
+        max: kind.max,
+        min: kind.min,
+        value: kind.value
+      };
+  }
+}
+
+function mapDukeFormControl(
+  control: DukeFormControl,
+  controlIndex: number,
+  workbookSheetIndex: number
+): XlsxFormControl {
+  return {
+    anchor: mapDukeFormControlAnchor(control.anchor),
+    controlIndex,
+    dukeAnchor: { ...control.anchor },
+    editAs: control.anchor.editAs,
+    hidden: false,
+    id: `form-control-${workbookSheetIndex}-${controlIndex}`,
+    locked: control.locked,
+    name: control.name,
+    printable: control.printable,
+    sheetIndex: workbookSheetIndex,
+    workbookSheetIndex,
+    zIndex: controlIndex + 1,
+    ...mapDukeFormControlKind(control.kind)
+  };
+}
+
+export function collectWorkbookFormControls(workbook: Workbook): XlsxFormControl[][] {
+  return Array.from({ length: workbook.sheetCount }, (_, workbookSheetIndex) => {
+    try {
+      const controls = workbook.getSheet(workbookSheetIndex).formControls;
+      return Array.isArray(controls)
+        ? controls.map((control, controlIndex) => mapDukeFormControl(control, controlIndex, workbookSheetIndex))
+        : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
 function parseFormControlKind(rawType: string | null | undefined): XlsxFormControl["kind"] {
   const normalized = (rawType ?? "").trim().toLowerCase();
   switch (normalized) {
@@ -2959,32 +3086,9 @@ function parseSheetFormControlNodes(
 
   return getLocalElements(sheetDocument, "control").map((controlNode) => ({
     anchor: parseAnchor(getFirstDescendant(controlNode, "anchor") ?? controlNode),
-    controlRelationshipId: getRelationshipId(controlNode),
     name: controlNode.getAttribute("name") ?? undefined,
     shapeId: parseFormControlShapeId(controlNode.getAttribute("shapeId"))
   }));
-}
-
-function parseCtrlPropDocument(
-  archive: ArchiveEntries,
-  ctrlPropPath: string
-) {
-  const xml = readArchiveText(archive, ctrlPropPath);
-  if (!xml) {
-    return null;
-  }
-
-  const document = parseXml(xml);
-  const root = document?.documentElement;
-  if (!root) {
-    return null;
-  }
-
-  return {
-    checked: parseSpreadsheetBooleanValue(root.getAttribute("checked")),
-    linkedCell: root.getAttribute("fmlaLink") ?? undefined,
-    objectType: root.getAttribute("objectType") ?? undefined
-  } satisfies ParsedCtrlProp;
 }
 
 function parseVmlFormControls(
@@ -3068,30 +3172,21 @@ function parseSheetFormControls(
       return;
     }
 
-    const ctrlPropRelationship = controlNode.controlRelationshipId
-      ? sheetRelationships.get(controlNode.controlRelationshipId) ?? null
-      : null;
-    const ctrlPropPath = ctrlPropRelationship?.type === CTRL_PROP_REL_TYPE
-      ? ctrlPropRelationship.target
-      : null;
-    const ctrlProp = ctrlPropPath
-      ? parseCtrlPropDocument(archive, ctrlPropPath)
-      : null;
     const vmlControl = controlNode.shapeId !== null
       ? vmlControlsByShapeId.get(controlNode.shapeId) ?? null
       : null;
-    const kind = parseFormControlKind(ctrlProp?.objectType ?? vmlControl?.objectType);
+    const kind = parseFormControlKind(vmlControl?.objectType);
 
     parsedControls.push({
       anchor: controlNode.anchor,
-      checked: ctrlProp?.checked ?? vmlControl?.checked,
+      checked: vmlControl?.checked,
       fontFamily: vmlControl?.fontFamily,
       fontSizePt: vmlControl?.fontSizePt,
       hidden: vmlControl?.hidden ?? false,
       id: `form-control-${workbookSheetIndex}-${index}`,
       kind,
       label: vmlControl?.label,
-      linkedCell: ctrlProp?.linkedCell ?? vmlControl?.linkedCell,
+      linkedCell: vmlControl?.linkedCell,
       name: controlNode.name,
       sheetIndex: workbookSheetIndex,
       textAlign: vmlControl?.textAlign,
@@ -3203,6 +3298,140 @@ function enrichFormControlsWithHiddenShapes(
   });
 }
 
+function getFormControlAnchorStart(anchor: XlsxFormControl["anchor"]) {
+  return anchor.kind === "absolute"
+    ? null
+    : { col: anchor.from.col, row: anchor.from.row };
+}
+
+function scoreParsedFormControlMatch(
+  dukeControl: XlsxFormControl,
+  parsedControl: XlsxFormControl,
+  parsedIndex: number
+) {
+  if (dukeControl.kind !== parsedControl.kind && parsedControl.kind !== "unknown") {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let score = 10;
+  const dukeName = normalizeControlLabel(dukeControl.name)?.toLowerCase();
+  const parsedName = normalizeControlLabel(parsedControl.name)?.toLowerCase();
+  if (dukeName && parsedName) {
+    if (dukeName !== parsedName) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    score += 100;
+  }
+
+  const dukeStart = getFormControlAnchorStart(dukeControl.anchor);
+  const parsedStart = getFormControlAnchorStart(parsedControl.anchor);
+  if (dukeStart && parsedStart && dukeStart.col === parsedStart.col && dukeStart.row === parsedStart.row) {
+    score += 40;
+  }
+  if (dukeControl.controlIndex === parsedIndex) {
+    score += 5;
+  }
+
+  return score;
+}
+
+function areDukeFormControlAnchorsEqual(
+  left: XlsxFormControl["dukeAnchor"],
+  right: XlsxFormControl["dukeAnchor"]
+) {
+  if (!left || !right) {
+    return true;
+  }
+  return (
+    left.editAs === right.editAs &&
+    left.fromCol === right.fromCol &&
+    left.fromColOffset === right.fromColOffset &&
+    left.fromRow === right.fromRow &&
+    left.fromRowOffset === right.fromRowOffset &&
+    left.toCol === right.toCol &&
+    left.toColOffset === right.toColOffset &&
+    left.toRow === right.toRow &&
+    left.toRowOffset === right.toRowOffset
+  );
+}
+
+function mergeDukeAndParsedFormControls(
+  dukeControls: XlsxFormControl[],
+  parsedControls: XlsxFormControl[],
+  keepUnmatchedParsedControl: (control: XlsxFormControl) => boolean = () => true
+) {
+  const usedParsedIndexes = new Set<number>();
+  const mergedControls = dukeControls.map((dukeControl) => {
+    let bestIndex = -1;
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    parsedControls.forEach((parsedControl, parsedIndex) => {
+      if (usedParsedIndexes.has(parsedIndex)) {
+        return;
+      }
+      const score = scoreParsedFormControlMatch(dukeControl, parsedControl, parsedIndex);
+      if (score > bestScore) {
+        bestIndex = parsedIndex;
+        bestScore = score;
+      }
+    });
+
+    const parsedControl = bestIndex >= 0 && bestScore >= 10
+      ? parsedControls[bestIndex]
+      : null;
+    if (!parsedControl) {
+      return dukeControl;
+    }
+
+    usedParsedIndexes.add(bestIndex);
+    const dukeAnchorChanged = !areDukeFormControlAnchorsEqual(
+      parsedControl.dukeAnchor,
+      dukeControl.dukeAnchor
+    );
+    return {
+      ...parsedControl,
+      ...dukeControl,
+      anchor: dukeAnchorChanged ? dukeControl.anchor : parsedControl.anchor,
+      fontFamily: parsedControl.fontFamily,
+      fontSizePt: parsedControl.fontSizePt,
+      hidden: parsedControl.hidden,
+      id: parsedControl.id,
+      label: dukeControl.label ?? parsedControl.label,
+      name: dukeControl.name ?? parsedControl.name,
+      textAlign: parsedControl.textAlign,
+      textColor: parsedControl.textColor,
+      zIndex: parsedControl.zIndex
+    } satisfies XlsxFormControl;
+  });
+
+  parsedControls.forEach((parsedControl, parsedIndex) => {
+    if (!usedParsedIndexes.has(parsedIndex) && keepUnmatchedParsedControl(parsedControl)) {
+      mergedControls.push(parsedControl);
+    }
+  });
+
+  return mergedControls.sort((left, right) => left.zIndex - right.zIndex);
+}
+
+/**
+ * Refreshes Duke-owned form-control semantics after a workbook mutation while
+ * retaining the VML-only visual metadata and unsupported controls from the
+ * original parse.
+ */
+export function refreshWorkbookFormControls(
+  workbook: Workbook,
+  currentControlsByWorkbookSheetIndex: XlsxFormControl[][]
+) {
+  const dukeControlsByWorkbookSheetIndex = collectWorkbookFormControls(workbook);
+  return dukeControlsByWorkbookSheetIndex.map((dukeControls, workbookSheetIndex) => (
+    mergeDukeAndParsedFormControls(
+      dukeControls,
+      currentControlsByWorkbookSheetIndex[workbookSheetIndex] ?? [],
+      (control) => control.controlIndex === undefined
+    )
+  ));
+}
+
 export function revokeWorkbookImageAssets(assets: WorkbookImageAssets | null) {
   if (!assets) {
     return;
@@ -3310,7 +3539,7 @@ export function parseWorkbookChartStyleAssets(bytes: Uint8Array): WorkbookChartS
   };
 }
 
-export function parseWorkbookImageAssets(bytes: Uint8Array): WorkbookImageAssets {
+export function parseWorkbookImageAssets(bytes: Uint8Array, workbook: Workbook): WorkbookImageAssets {
   const archive = unzipSync(bytes);
   const {
     contentTypes,
@@ -3329,6 +3558,7 @@ export function parseWorkbookImageAssets(bytes: Uint8Array): WorkbookImageAssets
   const shapesByWorkbookSheetIndex: XlsxShape[][] = [];
   const sheetOrigins: Array<WorkbookImageSheetOrigin | null> = [];
   const imageOriginsById = new Map<string, WorkbookImageOrigin>();
+  const dukeFormControlsByWorkbookSheetIndex = collectWorkbookFormControls(workbook);
 
   workbookSheets.forEach((sheet, workbookSheetIndex) => {
     const sheetRelationships = parseRelationships(archive, relsPathForDocument(sheet.path), sheet.path);
@@ -3379,7 +3609,10 @@ export function parseWorkbookImageAssets(bytes: Uint8Array): WorkbookImageAssets
       sheetStatesByWorkbookSheetIndex[workbookSheetIndex] ?? null
     );
 
-    formControlsByWorkbookSheetIndex[workbookSheetIndex] = enrichedFormControlList;
+    formControlsByWorkbookSheetIndex[workbookSheetIndex] = mergeDukeAndParsedFormControls(
+      dukeFormControlsByWorkbookSheetIndex[workbookSheetIndex] ?? [],
+      enrichedFormControlList
+    );
     imagesByWorkbookSheetIndex[workbookSheetIndex] = imageList;
     shapesByWorkbookSheetIndex[workbookSheetIndex] = visibleShapeList;
     sheetOrigins[workbookSheetIndex] = attachments.length > 0
