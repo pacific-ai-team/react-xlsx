@@ -46,6 +46,7 @@ export type {
   XlsxFormControlKind,
   XlsxFormControlKindInput,
   XlsxFormControlPatch,
+  XlsxFormControlRenderProps,
   XlsxFormControlSelectionMode,
   XlsxFormControlState,
   XlsxImage,

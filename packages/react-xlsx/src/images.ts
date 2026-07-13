@@ -3539,7 +3539,10 @@ export function parseWorkbookChartStyleAssets(bytes: Uint8Array): WorkbookChartS
   };
 }
 
-export function parseWorkbookImageAssets(bytes: Uint8Array, workbook: Workbook): WorkbookImageAssets {
+export function parseWorkbookImageAssets(
+  bytes: Uint8Array,
+  workbookOrFormControls: Workbook | XlsxFormControl[][]
+): WorkbookImageAssets {
   const archive = unzipSync(bytes);
   const {
     contentTypes,
@@ -3558,7 +3561,9 @@ export function parseWorkbookImageAssets(bytes: Uint8Array, workbook: Workbook):
   const shapesByWorkbookSheetIndex: XlsxShape[][] = [];
   const sheetOrigins: Array<WorkbookImageSheetOrigin | null> = [];
   const imageOriginsById = new Map<string, WorkbookImageOrigin>();
-  const dukeFormControlsByWorkbookSheetIndex = collectWorkbookFormControls(workbook);
+  const dukeFormControlsByWorkbookSheetIndex = Array.isArray(workbookOrFormControls)
+    ? workbookOrFormControls
+    : collectWorkbookFormControls(workbookOrFormControls);
 
   workbookSheets.forEach((sheet, workbookSheetIndex) => {
     const sheetRelationships = parseRelationships(archive, relsPathForDocument(sheet.path), sheet.path);

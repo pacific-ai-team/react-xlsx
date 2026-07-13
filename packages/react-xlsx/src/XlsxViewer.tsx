@@ -1205,6 +1205,11 @@ type WorksheetBatchWindow = {
   startRow: number;
 };
 
+type ThumbnailWorkerRowBatchRequest = {
+  endRow: number;
+  startRow: number;
+};
+
 function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
@@ -3835,6 +3840,46 @@ function getCellBooleanValue(worksheet: Worksheet, row: number, col: number) {
     return false;
   }
   return null;
+}
+
+function getBatchedCellNumericValue(cell: BatchedCellData | undefined) {
+  if (!cell) {
+    return null;
+  }
+
+  const text = cell.value.trim();
+  if (text.length === 0) {
+    return null;
+  }
+  if (text.toLowerCase() === "true") {
+    return 1;
+  }
+  if (text.toLowerCase() === "false") {
+    return 0;
+  }
+
+  const value = Number(text.replace(/,/g, ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+function getBatchedCellBooleanValue(cell: BatchedCellData | undefined) {
+  if (!cell) {
+    return null;
+  }
+
+  const text = cell.value.trim().toLowerCase();
+  if (text.length === 0) {
+    return null;
+  }
+  if (text === "true") {
+    return true;
+  }
+  if (text === "false") {
+    return false;
+  }
+
+  const value = Number(text);
+  return Number.isFinite(value) ? value !== 0 : null;
 }
 
 function parseA1RangeReference(reference: string): XlsxCellRange | null {
@@ -6644,6 +6689,7 @@ function XlsxGrid({
   onFormControlAction,
   onFormControlChange,
   renderChartLoading,
+  renderFormControl,
   palette,
   renderImage,
   renderImageSelection,
@@ -6657,7 +6703,7 @@ function XlsxGrid({
   showImages = true
 }: Pick<
   XlsxViewerProps,
-  "allowResizeInReadOnly" | "emptyState" | "enableCanvasSelectionAnimation" | "enableGestureZoom" | "errorState" | "experimentalCanvas" | "fileTooLargeState" | "getCellStyle" | "loadingComponent" | "loadingState" | "onFormControlAction" | "onFormControlChange" | "renderChartLoading" | "renderImage" | "renderImageSelection" | "renderScroller" | "renderTableHeaderMenu" | "selectionColor" | "selectionFillColor" | "selectionHeaderColor" | "showImages"
+  "allowResizeInReadOnly" | "emptyState" | "enableCanvasSelectionAnimation" | "enableGestureZoom" | "errorState" | "experimentalCanvas" | "fileTooLargeState" | "getCellStyle" | "loadingComponent" | "loadingState" | "onFormControlAction" | "onFormControlChange" | "renderChartLoading" | "renderFormControl" | "renderImage" | "renderImageSelection" | "renderScroller" | "renderTableHeaderMenu" | "selectionColor" | "selectionFillColor" | "selectionHeaderColor" | "showImages"
 > & {
   controller: XlsxViewerController;
   palette: ViewerPalette;
@@ -6937,20 +6983,25 @@ function XlsxGrid({
   const paneDrawingNodesCacheRef = React.useRef<{
     chartRects: Array<{ chart: XlsxChart; rect: XlsxImageRect }>;
     drawingViewportSignature: string;
+    formControlItemsById: Map<string, string[]>;
     formControlRects: Array<{ control: XlsxFormControl; rect: XlsxImageRect }>;
     imageRects: Array<{ image: XlsxImage; rect: XlsxImageRect }>;
+    isChartsLoading: boolean;
+    onFormControlAction: XlsxViewerProps["onFormControlAction"];
+    onFormControlChange: XlsxViewerProps["onFormControlChange"];
     palette: ViewerPalette;
     readOnly: boolean;
     renderChartLoading: XlsxViewerProps["renderChartLoading"];
+    renderFormControl: XlsxViewerProps["renderFormControl"];
     renderImage: XlsxViewerProps["renderImage"];
     renderImageSelection: XlsxViewerProps["renderImageSelection"];
-      isChartsLoading: boolean;
-      selectedChartElement: XlsxChartElementSelection | null;
-      selectedChartId: string | null;
+    selectedChartElement: XlsxChartElementSelection | null;
+    selectedChartId: string | null;
     selectedImageId: string | null;
     selectionStroke: string;
     shapeRects: Array<{ rect: XlsxImageRect; shape: XlsxShape }>;
     showImages: boolean;
+    updateFormControl: XlsxViewerController["updateFormControl"];
     value: Record<FrozenDrawingPane, React.ReactNode>;
   } | null>(null);
   const [drawingViewport, setDrawingViewport] = React.useState<DrawingViewport>({
@@ -9782,14 +9833,7 @@ function XlsxGrid({
     () => (shouldBakeCanvasStaticDrawings ? shapeRects.filter(({ shape }) => shape.hyperlink) : shapeRects),
     [shapeRects, shouldBakeCanvasStaticDrawings]
   );
-  const bakedFormControlRects = React.useMemo(
-    () => (shouldBakeCanvasStaticDrawings ? formControlRects : []),
-    [formControlRects, shouldBakeCanvasStaticDrawings]
-  );
-  const domFormControlRects = React.useMemo(
-    () => (shouldBakeCanvasStaticDrawings ? [] : formControlRects),
-    [formControlRects, shouldBakeCanvasStaticDrawings]
-  );
+  const domFormControlRects = formControlRects;
   const bakedImageRects = React.useMemo(
     () => (
       shouldBakeCanvasImages
@@ -9823,15 +9867,11 @@ function XlsxGrid({
     const shapeSignature = bakedShapeRects
       .map(({ rect, shape }) => `s:${shape.id}:${shape.zIndex}:${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`)
       .join("|");
-    const controlSignature = bakedFormControlRects
-      .map(({ control, rect }) => `f:${control.id}:${control.zIndex}:${control.state ?? Boolean(control.checked)}:${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`)
-      .join("|");
     const imageSignature = bakedImageRects
       .map(({ image, rect }) => `i:${image.id}:${image.src}:${image.zIndex}:${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`)
       .join("|");
-    return `${revision}:${canvasImageLoadVersion}:${shapeSignature}:${controlSignature}:${imageSignature}`;
+    return `${revision}:${canvasImageLoadVersion}:${shapeSignature}:${imageSignature}`;
   }, [
-    bakedFormControlRects,
     bakedImageRects,
     bakedShapeRects,
     canvasImageLoadVersion,
@@ -11746,12 +11786,6 @@ function XlsxGrid({
     let leftScrollHeaderDirtyRects = buildFullCanvasDirtyRect(rowHeaderWidth, leftScrollHeaderCanvasHeight);
     type BakedCanvasDrawingEntry =
       | {
-          kind: "formControl";
-          control: XlsxFormControl;
-          rect: XlsxImageRect;
-          zIndex: number;
-        }
-      | {
           kind: "image";
           image: XlsxImage;
           rect: XlsxImageRect;
@@ -11770,12 +11804,6 @@ function XlsxGrid({
             rect,
             shape,
             zIndex: shape.zIndex
-          })),
-          ...bakedFormControlRects.map(({ control, rect }) => ({
-            control,
-            kind: "formControl" as const,
-            rect,
-            zIndex: control.zIndex
           })),
           ...bakedImageRects.map(({ image, rect }) => ({
             image,
@@ -11942,105 +11970,6 @@ function XlsxGrid({
       drawBakedShapeText(context, shape, localLeft, localTop, rect.width, rect.height);
       context.restore();
     };
-    const drawBakedFormControl = (context: CanvasRenderingContext2D, control: XlsxFormControl, rect: XlsxImageRect) => {
-      const label = resolveFormControlLabel(control);
-      const stroke = paletteIsDark(palette) ? "#cbd5e1" : "#475569";
-      const textColor = control.textColor ?? "#000000";
-      const fontSizePx = Math.max(9 * zoomFactor, ((control.fontSizePt ?? 9) * 96 / 72) * zoomFactor);
-      const iconSize = Math.min(14 * zoomFactor, Math.max(0, rect.height - 4 * zoomFactor));
-      const controlChecked = isFormControlChecked(control);
-      const controlMixed = isFormControlMixed(control);
-      context.save();
-      context.font = `400 ${fontSizePx}px ${control.fontFamily ?? "Calibri, sans-serif"}`;
-      context.textBaseline = "middle";
-      context.fillStyle = textColor;
-      context.strokeStyle = stroke;
-      context.lineWidth = Math.max(1, zoomFactor);
-
-      if (control.kind === "group-box") {
-        const labelInset = label ? Math.max(7, fontSizePx * 0.5) : 0;
-        drawCanvasRoundedRect(context, rect.left, rect.top + labelInset, rect.width, Math.max(0, rect.height - labelInset), 2 * zoomFactor);
-        context.stroke();
-        if (label) {
-          context.fillStyle = SHEET_SURFACE;
-          const labelWidth = Math.min(rect.width - 16 * zoomFactor, measureCanvasTextWidth(context, label) + 8 * zoomFactor);
-          context.fillRect(rect.left + 8 * zoomFactor, rect.top, labelWidth, fontSizePx * 1.2);
-          context.fillStyle = textColor;
-          context.textAlign = "left";
-          context.fillText(label, rect.left + 12 * zoomFactor, rect.top + fontSizePx * 0.55);
-        }
-        context.restore();
-        return;
-      }
-
-      if (control.kind === "button" || control.kind === "dropdown" || control.kind === "editbox" || control.kind === "listbox" || control.kind === "scrollbar" || control.kind === "spinner" || control.kind === "unknown") {
-        if (control.kind === "button") {
-          const gradient = context.createLinearGradient(rect.left, rect.top, rect.left, rect.top + rect.height);
-          gradient.addColorStop(0, "#f8fafc");
-          gradient.addColorStop(1, "#e2e8f0");
-          context.fillStyle = gradient;
-        } else {
-          context.fillStyle = "transparent";
-        }
-        drawCanvasRoundedRect(context, rect.left, rect.top, rect.width, rect.height, control.kind === "button" ? 4 * zoomFactor : 2 * zoomFactor);
-        if (control.kind === "button") {
-          context.fill();
-        }
-        context.stroke();
-      }
-
-      let textLeft = rect.left + 2 * zoomFactor;
-      const textRightInset = control.kind === "dropdown" ? 18 * zoomFactor : 6 * zoomFactor;
-      if (control.kind === "checkbox") {
-        context.strokeRect(rect.left + 2 * zoomFactor, rect.top + (rect.height - iconSize) / 2, iconSize, iconSize);
-        if (controlChecked || controlMixed) {
-          context.fillStyle = paletteIsDark(palette) ? "#60a5fa" : "#2563eb";
-          context.fillRect(rect.left + 2 * zoomFactor + 1.5, rect.top + (rect.height - iconSize) / 2 + 1.5, Math.max(0, iconSize - 3), Math.max(0, iconSize - 3));
-          context.strokeStyle = paletteIsDark(palette) ? "#020617" : "#ffffff";
-          context.beginPath();
-          if (controlMixed) {
-            context.moveTo(rect.left + 2 * zoomFactor + iconSize * 0.25, rect.top + rect.height / 2);
-            context.lineTo(rect.left + 2 * zoomFactor + iconSize * 0.75, rect.top + rect.height / 2);
-          } else {
-            context.moveTo(rect.left + 2 * zoomFactor + iconSize * 0.24, rect.top + rect.height / 2 + iconSize * 0.06);
-            context.lineTo(rect.left + 2 * zoomFactor + iconSize * 0.45, rect.top + rect.height / 2 + iconSize * 0.26);
-            context.lineTo(rect.left + 2 * zoomFactor + iconSize * 0.8, rect.top + rect.height / 2 - iconSize * 0.2);
-          }
-          context.stroke();
-        }
-        textLeft += iconSize + 4 * zoomFactor;
-      } else if (control.kind === "radio") {
-        context.beginPath();
-        context.arc(rect.left + 2 * zoomFactor + iconSize / 2, rect.top + rect.height / 2, iconSize / 2, 0, Math.PI * 2);
-        context.stroke();
-        if (controlChecked) {
-          context.fillStyle = paletteIsDark(palette) ? "#60a5fa" : "#2563eb";
-          context.beginPath();
-          context.arc(rect.left + 2 * zoomFactor + iconSize / 2, rect.top + rect.height / 2, iconSize * 0.25, 0, Math.PI * 2);
-          context.fill();
-        }
-        textLeft += iconSize + 4 * zoomFactor;
-      }
-
-      if (label) {
-        const maxTextWidth = Math.max(0, rect.left + rect.width - textLeft - textRightInset);
-        const text = truncateCanvasText(context, label, maxTextWidth);
-        context.fillStyle = textColor;
-        context.textAlign = control.textAlign === "right" ? "right" : control.textAlign === "center" ? "center" : "left";
-        const textX = context.textAlign === "right"
-          ? rect.left + rect.width - textRightInset
-          : context.textAlign === "center"
-            ? textLeft + maxTextWidth / 2
-            : textLeft;
-        context.fillText(text, textX, rect.top + rect.height / 2);
-      }
-      if (control.kind === "dropdown") {
-        context.fillStyle = textColor;
-        context.textAlign = "center";
-        context.fillText("▼", rect.left + rect.width - 10 * zoomFactor, rect.top + rect.height / 2);
-      }
-      context.restore();
-    };
     const drawBakedCanvasDrawings = (
       pane: FrozenDrawingPane,
       context: CanvasRenderingContext2D,
@@ -12067,8 +11996,6 @@ function XlsxGrid({
 
         if (entry.kind === "shape") {
           drawBakedShape(context, entry.shape, localRect);
-        } else if (entry.kind === "formControl") {
-          drawBakedFormControl(context, entry.control, localRect);
         } else {
           const imageElement = getCanvasImage(entry.image);
           if (imageElement) {
@@ -12902,7 +12829,6 @@ function XlsxGrid({
     activeSheet,
     applyCanvasViewportCompensation,
     bakedCanvasDrawingSignature,
-    bakedFormControlRects,
     bakedImageRects,
     bakedShapeRects,
     canvasColumnHeaderCells,
@@ -13603,8 +13529,8 @@ function XlsxGrid({
       kind: XlsxFormControlKindInput,
       nextControl: Partial<XlsxFormControl>
     ) => {
-      if (control.controlIndex === undefined) {
-        return;
+      if (readOnly || control.controlIndex === undefined) {
+        return false;
       }
       const didUpdate = updateFormControl(control.controlIndex, { kind }, control.sheetIndex);
       if (didUpdate) {
@@ -13614,7 +13540,84 @@ function XlsxGrid({
           type: "change"
         });
       }
+      return didUpdate;
     };
+    const setControlState = (state: XlsxFormControl["state"] = "unchecked") => {
+      const kind = buildFormControlKindInput(control);
+      if (kind?.kind === "checkbox") {
+        return commitControlKind(
+          { ...kind, state },
+          { checked: state === "checked", state }
+        );
+      }
+      if (kind?.kind === "optionButton" && state !== "mixed") {
+        return commitControlKind(
+          { ...kind, state },
+          { checked: state === "checked", state }
+        );
+      }
+      return false;
+    };
+    const setControlSelected = (selected: number | number[] | undefined) => {
+      const kind = buildFormControlKindInput(control);
+      if (kind?.kind === "dropdown") {
+        const nextSelected = typeof selected === "number" ? selected : undefined;
+        return commitControlKind(
+          { ...kind, selected: nextSelected },
+          { selected: nextSelected }
+        );
+      }
+      if (kind?.kind === "listBox") {
+        const nextSelected = Array.isArray(selected)
+          ? selected
+          : typeof selected === "number" ? [selected] : [];
+        return commitControlKind(
+          { ...kind, selected: nextSelected },
+          { selected: nextSelected }
+        );
+      }
+      return false;
+    };
+    const setControlValue = (value: number) => {
+      if (!Number.isFinite(value)) {
+        return false;
+      }
+      const kind = buildFormControlKindInput(control);
+      if (kind?.kind !== "scrollbar" && kind?.kind !== "spinner") {
+        return false;
+      }
+      const nextValue = Math.max(kind.min, Math.min(kind.max, value));
+      return commitControlKind({ ...kind, value: nextValue }, { value: nextValue });
+    };
+    const activateControl = () => {
+      if (!readOnly && control.kind === "button") {
+        onFormControlAction?.({ control, type: "activate" });
+      }
+    };
+
+    if (renderFormControl) {
+      return (
+        <React.Fragment key={`${pane}-${control.id}`}>
+          {renderFormControl({
+            activate: activateControl,
+            checked: isFormControlChecked(control),
+            control,
+            disabled: !isInteractiveControl,
+            items: controlItems,
+            label: controlLabel,
+            mixed: isFormControlMixed(control),
+            readOnly,
+            rect,
+            setSelected: setControlSelected,
+            setState: setControlState,
+            setValue: setControlValue,
+            stopPropagation: stopControlPointerEvent,
+            style: commonStyle,
+            zoomFactor
+          })}
+        </React.Fragment>
+      );
+    }
 
     if (control.kind === "group-box") {
       const hasLabel = controlLabel.length > 0;
@@ -13658,19 +13661,16 @@ function XlsxGrid({
 
     if (control.kind === "radio") {
       const checked = isFormControlChecked(control);
-      const kind = buildFormControlKindInput(control);
       return (
         <button
+          aria-disabled={readOnly || control.controlIndex === undefined}
           aria-checked={checked}
-          disabled={readOnly || control.controlIndex === undefined}
+          disabled={!readOnly && control.controlIndex === undefined}
           key={`${pane}-${control.id}`}
           onClick={(event) => {
             event.stopPropagation();
-            if (!checked && kind?.kind === "optionButton") {
-              commitControlKind(
-                { ...kind, state: "checked" },
-                { checked: true, state: "checked" }
-              );
+            if (!checked) {
+              setControlState("checked");
             }
           }}
           onPointerDown={stopControlPointerEvent}
@@ -13682,6 +13682,7 @@ function XlsxGrid({
             boxSizing: "border-box",
             padding: `0 ${Math.max(1, zoomFactor)}px`
           }}
+          tabIndex={readOnly ? -1 : undefined}
           type="button"
         >
           {renderRadioControl(checked, palette, zoomFactor)}
@@ -13693,21 +13694,16 @@ function XlsxGrid({
     if (control.kind === "checkbox") {
       const checked = isFormControlChecked(control);
       const mixed = isFormControlMixed(control);
-      const kind = buildFormControlKindInput(control);
       return (
         <button
+          aria-disabled={readOnly || control.controlIndex === undefined}
           aria-checked={mixed ? "mixed" : checked}
-          disabled={readOnly || control.controlIndex === undefined}
+          disabled={!readOnly && control.controlIndex === undefined}
           key={`${pane}-${control.id}`}
           onClick={(event) => {
             event.stopPropagation();
-            if (kind?.kind === "checkbox") {
-              const nextState = checked && !mixed ? "unchecked" : "checked";
-              commitControlKind(
-                { ...kind, state: nextState },
-                { checked: nextState === "checked", state: nextState }
-              );
-            }
+            const nextState = checked && !mixed ? "unchecked" : "checked";
+            setControlState(nextState);
           }}
           onPointerDown={stopControlPointerEvent}
           role="checkbox"
@@ -13718,6 +13714,7 @@ function XlsxGrid({
             boxSizing: "border-box",
             padding: `0 ${Math.max(1, zoomFactor)}px`
           }}
+          tabIndex={readOnly ? -1 : undefined}
           type="button"
         >
           {renderCheckboxControl(checked, palette, zoomFactor, mixed)}
@@ -13729,11 +13726,12 @@ function XlsxGrid({
     if (control.kind === "button") {
       return (
         <button
-          disabled={readOnly || !onFormControlAction}
+          aria-disabled={readOnly || !onFormControlAction}
+          disabled={!readOnly && !onFormControlAction}
           key={`${pane}-${control.id}`}
           onClick={(event) => {
             event.stopPropagation();
-            onFormControlAction?.({ control, type: "activate" });
+            activateControl();
           }}
           onPointerDown={stopControlPointerEvent}
           style={{
@@ -13746,6 +13744,7 @@ function XlsxGrid({
             padding: `0 ${6 * zoomFactor}px`,
             textAlign: "center"
           }}
+          tabIndex={readOnly ? -1 : undefined}
           type="button"
         >
           {controlLabel}
@@ -13754,22 +13753,17 @@ function XlsxGrid({
     }
 
     if (control.kind === "dropdown") {
-      const kind = buildFormControlKindInput(control);
       const selected = typeof control.selected === "number" ? control.selected : undefined;
       return (
         <select
+          aria-disabled={readOnly || control.controlIndex === undefined || controlItems.length === 0}
           aria-label={controlLabel || control.name || "Dropdown form control"}
-          disabled={readOnly || control.controlIndex === undefined || controlItems.length === 0}
+          disabled={!readOnly && (control.controlIndex === undefined || controlItems.length === 0)}
           key={`${pane}-${control.id}`}
           onChange={(event) => {
             event.stopPropagation();
-            if (kind?.kind === "dropdown") {
-              const nextSelected = event.currentTarget.value === "" ? undefined : Number(event.currentTarget.value);
-              commitControlKind(
-                { ...kind, selected: nextSelected },
-                { selected: nextSelected }
-              );
-            }
+            const nextSelected = event.currentTarget.value === "" ? undefined : Number(event.currentTarget.value);
+            setControlSelected(nextSelected);
           }}
           onClick={stopControlPointerEvent}
           onPointerDown={stopControlPointerEvent}
@@ -13781,6 +13775,7 @@ function XlsxGrid({
             boxSizing: "border-box",
             padding: `0 ${4 * zoomFactor}px`
           }}
+          tabIndex={readOnly ? -1 : undefined}
           value={selected === undefined ? "" : String(selected)}
         >
           {selected === undefined ? <option value="">{controlLabel}</option> : null}
@@ -13790,26 +13785,21 @@ function XlsxGrid({
     }
 
     if (control.kind === "listbox") {
-      const kind = buildFormControlKindInput(control);
       const selected = Array.isArray(control.selected)
         ? control.selected
         : control.selected === undefined ? [] : [control.selected];
       const allowsMultipleSelection = (control.selection ?? "single") !== "single";
       return (
         <select
+          aria-disabled={readOnly || control.controlIndex === undefined || controlItems.length === 0}
           aria-label={controlLabel || control.name || "List box form control"}
-          disabled={readOnly || control.controlIndex === undefined || controlItems.length === 0}
+          disabled={!readOnly && (control.controlIndex === undefined || controlItems.length === 0)}
           key={`${pane}-${control.id}`}
           multiple={allowsMultipleSelection}
           onChange={(event) => {
             event.stopPropagation();
-            if (kind?.kind === "listBox") {
-              const nextSelected = Array.from(event.currentTarget.selectedOptions, (option) => Number(option.value));
-              commitControlKind(
-                { ...kind, selected: nextSelected },
-                { selected: nextSelected }
-              );
-            }
+            const nextSelected = Array.from(event.currentTarget.selectedOptions, (option) => Number(option.value));
+            setControlSelected(nextSelected);
           }}
           onClick={stopControlPointerEvent}
           onPointerDown={stopControlPointerEvent}
@@ -13824,6 +13814,7 @@ function XlsxGrid({
             display: "block",
             padding: 0
           }}
+          tabIndex={readOnly ? -1 : undefined}
           value={allowsMultipleSelection ? selected.map(String) : selected[0] === undefined ? "" : String(selected[0])}
         >
           {controlItems.map((item, index) => <option key={index} value={index}>{item}</option>)}
@@ -13832,22 +13823,19 @@ function XlsxGrid({
     }
 
     if (control.kind === "scrollbar") {
-      const kind = buildFormControlKindInput(control);
       const min = control.min ?? 0;
       const max = Math.max(min, control.max ?? 100);
       return (
         <input
+          aria-disabled={readOnly || control.controlIndex === undefined}
           aria-label={controlLabel || control.name || "Scrollbar form control"}
-          disabled={readOnly || control.controlIndex === undefined}
+          disabled={!readOnly && control.controlIndex === undefined}
           key={`${pane}-${control.id}`}
           max={max}
           min={min}
           onChange={(event) => {
             event.stopPropagation();
-            if (kind?.kind === "scrollbar") {
-              const value = event.currentTarget.valueAsNumber;
-              commitControlKind({ ...kind, value }, { value });
-            }
+            setControlValue(event.currentTarget.valueAsNumber);
           }}
           onClick={stopControlPointerEvent}
           onPointerDown={stopControlPointerEvent}
@@ -13859,6 +13847,7 @@ function XlsxGrid({
             padding: 0,
             writingMode: control.horizontal === false ? "vertical-lr" : undefined
           }}
+          tabIndex={readOnly ? -1 : undefined}
           type="range"
           value={Math.max(min, Math.min(max, control.value ?? min))}
         />
@@ -13866,22 +13855,19 @@ function XlsxGrid({
     }
 
     if (control.kind === "spinner") {
-      const kind = buildFormControlKindInput(control);
       const min = control.min ?? 0;
       const max = Math.max(min, control.max ?? 100);
       return (
         <input
+          aria-disabled={readOnly || control.controlIndex === undefined}
           aria-label={controlLabel || control.name || "Spinner form control"}
-          disabled={readOnly || control.controlIndex === undefined}
+          disabled={!readOnly && control.controlIndex === undefined}
           key={`${pane}-${control.id}`}
           max={max}
           min={min}
           onChange={(event) => {
             event.stopPropagation();
-            if (kind?.kind === "spinner" && Number.isFinite(event.currentTarget.valueAsNumber)) {
-              const value = Math.max(min, Math.min(max, event.currentTarget.valueAsNumber));
-              commitControlKind({ ...kind, value }, { value });
-            }
+            setControlValue(event.currentTarget.valueAsNumber);
           }}
           onClick={stopControlPointerEvent}
           onPointerDown={stopControlPointerEvent}
@@ -13894,6 +13880,7 @@ function XlsxGrid({
             boxSizing: "border-box",
             padding: `0 ${4 * zoomFactor}px`
           }}
+          tabIndex={readOnly ? -1 : undefined}
           type="number"
           value={Math.max(min, Math.min(max, control.value ?? min))}
         />
@@ -14223,20 +14210,25 @@ function XlsxGrid({
   const canReusePaneDrawingNodes =
     previousPaneDrawingNodes !== null
     && previousPaneDrawingNodes.showImages === showImages
+    && previousPaneDrawingNodes.updateFormControl === updateFormControl
     && previousPaneDrawingNodes.chartRects === chartRects
     && previousPaneDrawingNodes.formControlRects === domFormControlRects
+    && previousPaneDrawingNodes.formControlItemsById === formControlItemsById
     && previousPaneDrawingNodes.shapeRects === domShapeRects
     && previousPaneDrawingNodes.imageRects === domImageRects
     && previousPaneDrawingNodes.selectedChartId === selectedChartId
     && previousPaneDrawingNodes.selectedImageId === selectedImageId
     && previousPaneDrawingNodes.readOnly === readOnly
+    && previousPaneDrawingNodes.onFormControlAction === onFormControlAction
+    && previousPaneDrawingNodes.onFormControlChange === onFormControlChange
     && previousPaneDrawingNodes.selectionStroke === selectionStroke
     && previousPaneDrawingNodes.renderChartLoading === renderChartLoading
+    && previousPaneDrawingNodes.renderFormControl === renderFormControl
     && previousPaneDrawingNodes.renderImage === renderImage
     && previousPaneDrawingNodes.renderImageSelection === renderImageSelection
-      && previousPaneDrawingNodes.isChartsLoading === isChartsLoading
-      && previousPaneDrawingNodes.selectedChartElement === selectedChartElement
-      && previousPaneDrawingNodes.palette === palette
+    && previousPaneDrawingNodes.isChartsLoading === isChartsLoading
+    && previousPaneDrawingNodes.selectedChartElement === selectedChartElement
+    && previousPaneDrawingNodes.palette === palette
     && previousPaneDrawingNodes.drawingViewportSignature === drawingViewportCacheSignature;
   const paneDrawingNodes = canReusePaneDrawingNodes
     ? previousPaneDrawingNodes.value
@@ -14286,20 +14278,25 @@ function XlsxGrid({
     paneDrawingNodesCacheRef.current = {
       chartRects,
       drawingViewportSignature: drawingViewportCacheSignature,
+      formControlItemsById,
       formControlRects: domFormControlRects,
       imageRects: domImageRects,
-        isChartsLoading,
-        palette,
-        readOnly,
-        renderChartLoading,
-        renderImage,
-        renderImageSelection,
-        selectedChartElement,
-        selectedChartId,
+      isChartsLoading,
+      onFormControlAction,
+      onFormControlChange,
+      palette,
+      readOnly,
+      renderChartLoading,
+      renderFormControl,
+      renderImage,
+      renderImageSelection,
+      selectedChartElement,
+      selectedChartId,
       selectedImageId,
       selectionStroke,
       shapeRects: domShapeRects,
       showImages,
+      updateFormControl,
       value: paneDrawingNodes
     };
   }
@@ -15658,6 +15655,7 @@ function XlsxViewerInner({
   onFormControlAction,
   onFormControlChange,
   renderChartLoading,
+  renderFormControl,
   renderImage,
   renderImageSelection,
   renderScroller,
@@ -15732,6 +15730,7 @@ function XlsxViewerInner({
                 onFormControlChange={onFormControlChange}
                 palette={palette}
                 renderChartLoading={renderChartLoading}
+                renderFormControl={renderFormControl}
                 renderImage={renderImage}
                 renderImageSelection={renderImageSelection}
                 renderScroller={renderScroller}
@@ -16187,7 +16186,14 @@ export function useXlsxViewerCharts(): XlsxViewerCharts {
 export function useXlsxViewerThumbnails(
   options: UseXlsxViewerThumbnailsOptions = {}
 ): XlsxViewerThumbnails {
-  const { getSheetFormControls, getSheetImages, getSheetShapes, workbook, sheets } = useXlsxViewer();
+  const {
+    getRowsBatchAsync,
+    getSheetFormControls,
+    getSheetImages,
+    getSheetShapes,
+    workbook,
+    sheets
+  } = useXlsxViewer();
   const { isDark } = React.useContext(ViewerAppearanceContext);
   const palette = useViewerPalette(isDark);
   const includeHeaders = options.includeHeaders ?? true;
@@ -16198,8 +16204,13 @@ export function useXlsxViewerThumbnails(
     loaded: boolean;
     src: string;
   }>());
+  const workerThumbnailRowBatchCacheRef = React.useRef(new Map<XlsxSheetData, WorksheetBatchWindow>());
+  const workerThumbnailRowBatchRequestRef = React.useRef(
+    new Map<XlsxSheetData, ThumbnailWorkerRowBatchRequest>()
+  );
   const isMountedRef = React.useRef(false);
   const [thumbnailImageLoadVersion, setThumbnailImageLoadVersion] = React.useState(0);
+  const [workerThumbnailRowBatchVersion, setWorkerThumbnailRowBatchVersion] = React.useState(0);
 
   React.useEffect(() => {
     isMountedRef.current = true;
@@ -16207,6 +16218,73 @@ export function useXlsxViewerThumbnails(
       isMountedRef.current = false;
     };
   }, []);
+
+  React.useEffect(() => {
+    const currentSheets = new Set(sheets);
+    for (const sheet of workerThumbnailRowBatchCacheRef.current.keys()) {
+      if (!currentSheets.has(sheet)) {
+        workerThumbnailRowBatchCacheRef.current.delete(sheet);
+      }
+    }
+    for (const sheet of workerThumbnailRowBatchRequestRef.current.keys()) {
+      if (!currentSheets.has(sheet)) {
+        workerThumbnailRowBatchRequestRef.current.delete(sheet);
+      }
+    }
+  }, [sheets]);
+
+  const getWorkerThumbnailRowBatch = React.useCallback((
+    sheet: XlsxSheetData,
+    startRow: number,
+    endRow: number
+  ) => {
+    const cachedBatch = workerThumbnailRowBatchCacheRef.current.get(sheet);
+    if (cachedBatch && startRow >= cachedBatch.startRow && endRow <= cachedBatch.endRow) {
+      return cachedBatch;
+    }
+    if (!getRowsBatchAsync) {
+      return null;
+    }
+
+    const pendingRequest = workerThumbnailRowBatchRequestRef.current.get(sheet);
+    if (!pendingRequest) {
+      const request = {
+        endRow: Math.max(endRow, cachedBatch?.endRow ?? endRow),
+        startRow: Math.min(startRow, cachedBatch?.startRow ?? startRow)
+      };
+      workerThumbnailRowBatchRequestRef.current.set(sheet, request);
+
+      void getRowsBatchAsync(
+        sheet.workbookSheetIndex,
+        request.startRow,
+        request.endRow - request.startRow + 1
+      )
+        .then((rows) => {
+          if (workerThumbnailRowBatchRequestRef.current.get(sheet) !== request) {
+            return;
+          }
+          workerThumbnailRowBatchRequestRef.current.delete(sheet);
+          if (!rows) {
+            return;
+          }
+
+          workerThumbnailRowBatchCacheRef.current.set(
+            sheet,
+            buildWorksheetBatchWindow(rows, sheet, request.startRow, request.endRow)
+          );
+          if (isMountedRef.current) {
+            setWorkerThumbnailRowBatchVersion((version) => version + 1);
+          }
+        })
+        .catch(() => {
+          if (workerThumbnailRowBatchRequestRef.current.get(sheet) === request) {
+            workerThumbnailRowBatchRequestRef.current.delete(sheet);
+          }
+        });
+    }
+
+    return null;
+  }, [getRowsBatchAsync]);
 
   const getThumbnailImage = React.useCallback((image: XlsxImage) => {
     if (typeof Image === "undefined") {
@@ -16468,6 +16546,13 @@ export function useXlsxViewerThumbnails(
           return false;
         }
 
+        const workerRowBatch = worksheet
+          ? null
+          : getWorkerThumbnailRowBatch(sheet, sourceRange.start.row, sourceRange.end.row);
+        if (!worksheet && !workerRowBatch) {
+          return false;
+        }
+
         const context = canvas.getContext("2d", { alpha: false });
         if (!context) {
           return false;
@@ -16508,10 +16593,6 @@ export function useXlsxViewerThumbnails(
           context.fillRect(0, 0, rowHeaderWidth, headerHeight);
         }
 
-        if (!worksheet) {
-          return true;
-        }
-
         const conditionalFormatMetricsCache = new Map<string, number[]>();
         const cellRenderCache = new Map<string, CellRenderData>();
         const getCellData = (row: number, col: number): CellRenderData => {
@@ -16521,7 +16602,11 @@ export function useXlsxViewerThumbnails(
             return cached;
           }
 
-          if (worksheet.isMergedSecondary(row, col)) {
+          const batchCoversRow = workerRowBatch
+            ? row >= workerRowBatch.startRow && row <= workerRowBatch.endRow
+            : false;
+          const batchedCell = batchCoversRow ? workerRowBatch?.cells.get(cacheKey) : undefined;
+          if (batchedCell?.isMergedSecondary || worksheet?.isMergedSecondary(row, col)) {
             const mergedSecondaryData: CellRenderData = {
               isMergedSecondary: true,
               style: {},
@@ -16531,59 +16616,58 @@ export function useXlsxViewerThumbnails(
             return mergedSecondaryData;
           }
 
-          const merge = worksheet.getMergeSpan(row, col) as { colSpan?: number; rowSpan?: number } | null | undefined;
+          const merge = worksheet
+            ? (worksheet.getMergeSpan(row, col) as { colSpan?: number; rowSpan?: number } | null | undefined)
+            : batchedCell?.mergeSpan;
           const inheritedStyle = resolveInheritedCellStyle(sheet, row, col);
-          const worksheetStyle = (worksheet.getCellStyleAt(row, col) as Record<string, unknown> | null | undefined) ?? null;
+          const worksheetStyle = worksheet
+            ? (worksheet.getCellStyleAt(row, col) as Record<string, unknown> | null | undefined) ?? null
+            : batchedCell?.style ?? null;
           const mergedStyle = mergeResolvedCellStyle(inheritedStyle, worksheetStyle, { replaceXfSubtrees: true });
           const alignment = mergedStyle?.alignment as Record<string, unknown> | undefined;
           const sparkline = sparklineByCell.get(cacheKey) ?? null;
+          const getNumericValue = (targetRow: number, targetCol: number) => (
+            worksheet
+              ? getCellNumericValue(worksheet, targetRow, targetCol)
+              : getBatchedCellNumericValue(workerRowBatch?.cells.get(`${targetRow}:${targetCol}`))
+          );
           const sparklineValues = sparkline
             ? (
                 sparkline.range.start.row === sparkline.range.end.row
                   ? Array.from(
                       { length: Math.abs(sparkline.range.end.col - sparkline.range.start.col) + 1 },
-                      (_, index) => getCellNumericValue(
-                        worksheet,
+                      (_, index) => getNumericValue(
                         sparkline.range.start.row,
                         Math.min(sparkline.range.start.col, sparkline.range.end.col) + index
                       )
                     )
                   : Array.from(
                       { length: Math.abs(sparkline.range.end.row - sparkline.range.start.row) + 1 },
-                      (_, index) => getCellNumericValue(
-                        worksheet,
+                      (_, index) => getNumericValue(
                         Math.min(sparkline.range.start.row, sparkline.range.end.row) + index,
                         sparkline.range.start.col
                       )
                     )
               )
             : null;
-          const checkboxState = mergedStyle?.cellControl ? getCellBooleanValue(worksheet, row, col) : null;
+          const checkboxState = mergedStyle?.cellControl
+            ? worksheet
+              ? getCellBooleanValue(worksheet, row, col)
+              : getBatchedCellBooleanValue(batchedCell)
+            : null;
           const nextData: CellRenderData = {
             canvas: undefined,
             checkboxState,
             colSpan: merge?.colSpan,
-            conditionalColorScale: resolveConditionalColorScaleForCell(
-              row,
-              col,
-              worksheet,
-              sheet,
-              conditionalFormatMetricsCache
-            ),
-            conditionalDataBar: resolveConditionalDataBarForCell(
-              row,
-              col,
-              worksheet,
-              sheet,
-              conditionalFormatMetricsCache
-            ),
-            conditionalIcon: resolveConditionalIconForCell(
-              row,
-              col,
-              worksheet,
-              sheet,
-              conditionalFormatMetricsCache
-            ),
+            conditionalColorScale: worksheet
+              ? resolveConditionalColorScaleForCell(row, col, worksheet, sheet, conditionalFormatMetricsCache)
+              : null,
+            conditionalDataBar: worksheet
+              ? resolveConditionalDataBarForCell(row, col, worksheet, sheet, conditionalFormatMetricsCache)
+              : null,
+            conditionalIcon: worksheet
+              ? resolveConditionalIconForCell(row, col, worksheet, sheet, conditionalFormatMetricsCache)
+              : null,
             isMergedSecondary: false,
             rowSpan: merge?.rowSpan,
             sparkline: sparkline && sparklineValues ? { config: sparkline, values: sparklineValues } : null,
@@ -16595,7 +16679,9 @@ export function useXlsxViewerThumbnails(
               ? ""
               : checkboxState !== null
                 ? ""
-                : getCellDisplayValue(worksheet, row, col, sheet)
+                : worksheet
+                  ? getCellDisplayValue(worksheet, row, col, sheet)
+                  : batchedCell?.value ?? ""
           };
 
           nextData.canvas = buildCanvasCellStyleCache(nextData.style);
@@ -16911,12 +16997,14 @@ export function useXlsxViewerThumbnails(
     getSheetFormControls,
     getSheetImages,
     getSheetShapes,
+    getWorkerThumbnailRowBatch,
     getThumbnailImage,
     includeHeaders,
     palette,
     resolution,
     sheets,
     thumbnailImageLoadVersion,
+    workerThumbnailRowBatchVersion,
     workbook
   ]);
 

@@ -80,6 +80,7 @@ You can also call `initWasm()` (optionally with a source) ahead of time to warm 
 - Regular worksheet rendering with frozen panes, tables, and selection state
 - Embedded charts on worksheets and dedicated chartsheet tabs
 - Embedded worksheet images with custom render hooks
+- Excel form controls with editable defaults and a `renderFormControl(...)` customization hook
 - Worksheet thumbnail painting via `useXlsxViewerThumbnails(...)`
 - Custom table header trigger rendering via `renderTableHeaderMenu(...)`
 - Inline controller usage or provider-driven composition with hooks
@@ -183,6 +184,7 @@ export function WorkbookWorkspace({ buffer }: { buffer: ArrayBuffer }) {
 | `errorState` | `React.ReactNode \| (error: Error) => React.ReactNode` | Custom error UI. |
 | `fileTooLargeState` | `React.ReactNode \| (props: XlsxFileTooLargeRenderProps) => React.ReactNode` | Custom oversized-file UI. When provided and the limit is hit, this replaces the built-in viewer chrome. |
 | `renderChartLoading` | `(props: XlsxChartLoadingRenderProps) => React.ReactNode` | Replaces the default chart-loading placeholder. |
+| `renderFormControl` | `(props: XlsxFormControlRenderProps) => React.ReactNode` | Replaces built-in checkboxes, radios, selects, lists, buttons, sliders, spinners, labels, and group boxes. Supplies positioning plus safe Duke-backed setters. |
 | `renderImage` | `(props: XlsxImageRenderProps) => React.ReactNode` | Replaces how worksheet images render. |
 | `renderImageSelection` | `(props: XlsxImageSelectionRenderProps) => React.ReactNode` | Replaces the selected-image overlay and resize handles. |
 | `renderTableHeaderMenu` | `(props: XlsxTableHeaderMenuRenderProps) => React.ReactNode` | Replaces the built-in table-header trigger. Return your full trigger + menu UI, such as a Radix `DropdownMenu`. |
@@ -220,6 +222,55 @@ import { XlsxViewer } from "@extend-ai/react-xlsx";
 ```
 
 Apply `triggerProps` to the actual trigger button so clicks do not leak into grid selection.
+
+Form controls use the same render-prop pattern. Switch on `control.kind`, apply `style` to the custom root, and call `stopPropagation` from pointer/click handlers. The supplied setters retain linked-cell updates, undo/redo, export, and `onFormControlChange` behavior.
+
+```tsx
+<XlsxViewer
+  file={buffer}
+  renderFormControl={({
+    checked,
+    control,
+    disabled,
+    items,
+    label,
+    setSelected,
+    setState,
+    stopPropagation,
+    style
+  }) => {
+    if (control.kind === "checkbox" || control.kind === "radio") {
+      return (
+        <label onPointerDown={stopPropagation} style={style}>
+          <input
+            checked={checked}
+            disabled={disabled}
+            onChange={(event) => setState(event.currentTarget.checked ? "checked" : "unchecked")}
+            type={control.kind === "radio" ? "radio" : "checkbox"}
+          />
+          {label}
+        </label>
+      );
+    }
+
+    if (control.kind === "dropdown") {
+      return (
+        <select
+          disabled={disabled}
+          onChange={(event) => setSelected(Number(event.currentTarget.value))}
+          onPointerDown={stopPropagation}
+          style={style}
+          value={typeof control.selected === "number" ? control.selected : ""}
+        >
+          {items.map((item, index) => <option key={index} value={index}>{item}</option>)}
+        </select>
+      );
+    }
+
+    return <div style={style}>{label}</div>;
+  }}
+/>
+```
 
 Notes:
 
@@ -471,6 +522,7 @@ The package also exports the main types you are likely to use for custom integra
 - `XlsxCellStyleInput`, `XlsxCellFontStyleInput`, `XlsxCellFillStyleInput`, `XlsxCellBorderStyleInput`
 - `XlsxChart`, `XlsxChartSeries`, `XlsxChartAxis`, `XlsxChartsheet`
 - `XlsxImage`, `XlsxImageRect`, `XlsxImageRenderProps`, `XlsxImageSelectionRenderProps`
+- `XlsxFormControl`, `XlsxFormControlRenderProps`
 - `XlsxSheetThumbnail`, `XlsxSheetThumbnailResolution`
 - `XlsxTable`, `XlsxTableColumn`, `XlsxTableHeaderMenuRenderProps`
 - `XlsxWorkbookTab`, `XlsxCellAddress`, `XlsxCellRange`, `XlsxCellStyleContext`

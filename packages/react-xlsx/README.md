@@ -360,6 +360,31 @@ export function CustomWorkbook({ file }: { file: ArrayBuffer }) {
 
 Apply `triggerProps` to the table-header trigger button so clicks do not leak into grid selection.
 
+Use `renderFormControl` to replace the built-in worksheet widgets. The callback receives the parsed `control`, resolved `items` and `label`, calculated `style`, read-only state, and `activate`, `setState`, `setSelected`, and `setValue` helpers. Apply `style` to the custom root and call `stopPropagation` from pointer/click handlers. The helpers keep Duke mutations, linked cells, undo/redo, export, and `onFormControlChange` in sync.
+
+```tsx
+<XlsxViewer
+  file={file}
+  renderFormControl={({ checked, control, disabled, label, setState, stopPropagation, style }) => {
+    if (control.kind === "checkbox" || control.kind === "radio") {
+      return (
+        <label onPointerDown={stopPropagation} style={style}>
+          <input
+            checked={checked}
+            disabled={disabled}
+            onChange={(event) => setState(event.currentTarget.checked ? "checked" : "unchecked")}
+            type={control.kind === "radio" ? "radio" : "checkbox"}
+          />
+          {label}
+        </label>
+      );
+    }
+
+    return <div style={style}>{label}</div>;
+  }}
+/>
+```
+
 ## Large Files
 
 `XlsxViewer` includes guardrails for large workbooks.
@@ -437,6 +462,7 @@ Common rendering props:
 - `renderImage?: (props: XlsxImageRenderProps) => React.ReactNode`
 - `renderImageSelection?: (props: XlsxImageSelectionRenderProps) => React.ReactNode`
 - `renderChartLoading?: (props: XlsxChartLoadingRenderProps) => React.ReactNode`
+- `renderFormControl?: (props: XlsxFormControlRenderProps) => React.ReactNode`
 - `renderTableHeaderMenu?: (props: XlsxTableHeaderMenuRenderProps) => React.ReactNode`
 - `renderScroller?: (props: XlsxScrollerRenderProps) => React.ReactNode`
 
@@ -607,6 +633,7 @@ The package exports the main types you are likely to use for custom integrations
 - `XlsxChart`, `XlsxChartSeries`, `XlsxChartAxis`, `XlsxChartElementSelection`, `XlsxChartsheet`
 - `XlsxFormulaTarget`
 - `XlsxImage`, `XlsxImageRect`, `XlsxImageRenderProps`, `XlsxImageSelectionRenderProps`
+- `XlsxFormControl`, `XlsxFormControlRenderProps`
 - `XlsxTable`, `XlsxTableColumn`, `XlsxTableHeaderMenuRenderProps`
 - `XlsxWorkbookTab`, `XlsxCellAddress`, `XlsxCellRange`
 

@@ -2538,13 +2538,27 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
               throw new Error("Worker chart payload incomplete");
             }
 
+            const workerImageAssets = effectiveSkipXmlParsing
+              ? null
+              : parseWorkbookImageAssets(
+                  new Uint8Array(buffer),
+                  snapshot.formControlsByWorkbookSheetIndex
+                );
+            if (!isCurrent || abortController.signal.aborted) {
+              revokeWorkbookImageAssets(workerImageAssets);
+              return;
+            }
+
+            setImageAssets(workerImageAssets);
             setWorkbook(null);
             setSheets(snapshot.sheets);
             setChartsByWorkbookSheetIndex(snapshot.chartsByWorkbookSheetIndex);
             setChartsheets(snapshot.chartsheets);
             setTabs(snapshot.tabs);
             chartAssetsRef.current = null;
-            setFormControlsByWorkbookSheetIndex(snapshot.formControlsByWorkbookSheetIndex);
+            if (!workerImageAssets) {
+              setFormControlsByWorkbookSheetIndex(snapshot.formControlsByWorkbookSheetIndex);
+            }
             setWorkerTablesByWorkbookSheetIndex(snapshot.tablesByWorkbookSheetIndex);
             setShouldAutoCalculate(false);
             setIsWorkerBacked(true);
@@ -3119,7 +3133,13 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
   const getFormControlItems = React.useCallback((controlIndex: number, sheetIndex = activeSheetIndex) => {
     const target = getFormControlWorksheet(sheetIndex);
     if (!workbook || !target) {
-      return [];
+      const targetSheet = sheets[sheetIndex];
+      if (!targetSheet) {
+        return [];
+      }
+      const control = (formControlsByWorkbookSheetIndex[targetSheet.workbookSheetIndex] ?? [])
+        .find((entry) => entry.controlIndex === controlIndex);
+      return control?.items?.slice() ?? [];
     }
     const control = target.worksheet.formControls[controlIndex];
     const inputRange = control?.kind.kind === "listBox" || control?.kind.kind === "dropdown"
@@ -3140,7 +3160,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
       }
     }
     return items;
-  }, [activeSheetIndex, getFormControlWorksheet, workbook]);
+  }, [activeSheetIndex, formControlsByWorkbookSheetIndex, getFormControlWorksheet, sheets, workbook]);
 
   const getSheetShapes = React.useCallback((sheetIndex = activeSheetIndex) => {
     const targetSheet = sheets[sheetIndex];

@@ -558,6 +558,8 @@ export interface XlsxFormControl {
   id: string;
   increment?: number;
   inputRange?: string;
+  /** Current formatted labels resolved from a dropdown or list box input range. */
+  items?: string[];
   kind: XlsxFormControlKind;
   label?: string;
   lines?: number;
@@ -590,6 +592,39 @@ export interface XlsxFormControlChangeEvent {
   control: XlsxFormControl;
   previousControl: XlsxFormControl;
   type: "change";
+}
+
+export interface XlsxFormControlRenderProps {
+  /** Activates a button control. No-ops in read-only mode. */
+  activate: () => void;
+  /** Current checked state for checkbox and radio controls. */
+  checked: boolean;
+  /** Full parsed control metadata. Switch on `control.kind` to render a kind-specific component. */
+  control: XlsxFormControl;
+  /** True when this control cannot be changed through the viewer. */
+  disabled: boolean;
+  /** Current formatted dropdown or list box items resolved from the control input range. */
+  items: string[];
+  /** Display label after placeholder Excel names have been removed. */
+  label: string;
+  /** True when a checkbox is in Excel's indeterminate state. */
+  mixed: boolean;
+  /** True when the viewer is rendering without workbook mutation support. */
+  readOnly: boolean;
+  /** Calculated worksheet-relative control rectangle in CSS pixels. */
+  rect: XlsxImageRect;
+  /** Persists a dropdown or list box selection. No-ops for other control kinds or in read-only mode. */
+  setSelected: (selected: number | number[] | undefined) => boolean;
+  /** Persists a checkbox or radio state. No-ops for other control kinds or in read-only mode. */
+  setState: (state: XlsxFormControlState) => boolean;
+  /** Persists a scrollbar or spinner value. No-ops for other control kinds or in read-only mode. */
+  setValue: (value: number) => boolean;
+  /** Stops an event from leaking into worksheet selection. */
+  stopPropagation: (event: React.SyntheticEvent) => void;
+  /** Apply this style to the custom control root to preserve worksheet positioning and sizing. */
+  style: React.CSSProperties;
+  /** Current worksheet zoom multiplier, where `1` is 100%. */
+  zoomFactor: number;
 }
 
 export interface XlsxChartReference {
@@ -1519,6 +1554,12 @@ export interface XlsxViewerProps extends UseXlsxViewerControllerOptions {
   onFormControlChange?: (event: XlsxFormControlChangeEvent) => void;
   /** Replaces the chart loading placeholder. */
   renderChartLoading?: (props: XlsxChartLoadingRenderProps) => React.ReactNode;
+  /**
+   * Replaces built-in worksheet form-control rendering.
+   * Apply `style` to the custom root and use `stopPropagation` on pointer/click handlers.
+   * The supplied setters preserve Duke mutation, linked-cell, undo/redo, and change-event behavior.
+   */
+  renderFormControl?: (props: XlsxFormControlRenderProps) => React.ReactNode;
   /**
    * Replaces worksheet images while preserving their calculated rect and style.
    *

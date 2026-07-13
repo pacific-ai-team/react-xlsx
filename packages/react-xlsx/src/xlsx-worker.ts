@@ -292,6 +292,81 @@ function parseA1RangeReference(reference: string): XlsxCellRange | null {
   return normalizeRange({ end, start });
 }
 
+type ResolvedWorkbookReference = {
+  range: XlsxCellRange;
+  worksheet: ReturnType<Workbook["getSheet"]>;
+};
+
+function resolveWorkbookReference(
+  targetWorkbook: Workbook,
+  defaultWorkbookSheetIndex: number,
+  rawReference: string,
+  resolvingNamedRange = false
+): ResolvedWorkbookReference | null {
+  const reference = rawReference.trim().replace(/^=/, "");
+  if (!reference) {
+    return null;
+  }
+
+  let workbookSheetIndex = defaultWorkbookSheetIndex;
+  let rangeReference = reference;
+  const bangIndex = reference.lastIndexOf("!");
+  if (bangIndex >= 0) {
+    let sheetName = reference.slice(0, bangIndex).trim();
+    rangeReference = reference.slice(bangIndex + 1).trim();
+    if (sheetName.startsWith("'") && sheetName.endsWith("'")) {
+      sheetName = sheetName.slice(1, -1).replace(/''/g, "'");
+    }
+    const resolvedSheetIndex = targetWorkbook.sheetIndex(sheetName);
+    if (resolvedSheetIndex === undefined) {
+      return null;
+    }
+    workbookSheetIndex = resolvedSheetIndex;
+  } else if (!resolvingNamedRange) {
+    const namedRange = targetWorkbook.getNamedRange(reference);
+    if (namedRange) {
+      return resolveWorkbookReference(targetWorkbook, defaultWorkbookSheetIndex, namedRange, true);
+    }
+  }
+
+  const range = parseA1RangeReference(rangeReference.replace(/\$/g, ""));
+  if (!range || workbookSheetIndex < 0 || workbookSheetIndex >= targetWorkbook.sheetCount) {
+    return null;
+  }
+
+  try {
+    return {
+      range,
+      worksheet: targetWorkbook.getSheet(workbookSheetIndex)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function resolveFormControlItems(
+  targetWorkbook: Workbook,
+  workbookSheetIndex: number,
+  control: XlsxFormControl
+) {
+  if ((control.kind !== "dropdown" && control.kind !== "listbox") || !control.inputRange) {
+    return [];
+  }
+
+  const source = resolveWorkbookReference(targetWorkbook, workbookSheetIndex, control.inputRange);
+  if (!source) {
+    return [];
+  }
+
+  const items: string[] = [];
+  for (let row = source.range.start.row; row <= source.range.end.row; row += 1) {
+    for (let col = source.range.start.col; col <= source.range.end.col; col += 1) {
+      items.push(source.worksheet.getFormattedValueAt(row, col));
+    }
+  }
+  return items;
+}
+
 function parseWorksheetFreezePanes(worksheet: ReturnType<Workbook["getSheet"]>): XlsxFreezePanes | null {
   const rawFreezePanes = worksheet.freezePanes as Record<string, unknown> | null | undefined;
   const row = typeof rawFreezePanes?.row === "number" && rawFreezePanes.row >= 0 ? rawFreezePanes.row : null;
@@ -686,7 +761,12 @@ async function loadWorkbook(buffer: ArrayBuffer, skipXmlParsing = false, showHid
   }
 
   const nextWorkbook = activeWorkbook;
-  formControlsByWorkbookSheetIndex = collectWorkbookFormControls(nextWorkbook);
+  formControlsByWorkbookSheetIndex = collectWorkbookFormControls(nextWorkbook).map(
+    (controls, workbookSheetIndex) => controls.map((control) => ({
+      ...control,
+      items: resolveFormControlItems(nextWorkbook, workbookSheetIndex, control)
+    }))
+  );
   const shouldUseFastStructureParse =
     bytes.byteLength >= FAST_STRUCTURE_PARSE_THRESHOLD_BYTES && totalFormulas <= FORMULA_COUNT_THRESHOLD;
   const structureAssets = effectiveSkipXmlParsing || shouldUseFastStructureParse || !canParseXmlInWorker()
