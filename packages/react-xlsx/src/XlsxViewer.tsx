@@ -84,7 +84,7 @@ const THUMBNAIL_MAX_COLS = 80;
 const THUMBNAIL_MAX_SOURCE_HEIGHT_PX = 900;
 const THUMBNAIL_MAX_SOURCE_WIDTH_PX = 1440;
 const LIVE_ZOOM_COMMIT_IDLE_MS = 48;
-const WHEEL_ZOOM_SENSITIVITY = 0.00025;
+const WHEEL_ZOOM_SENSITIVITY = 0.0025;
 const WHEEL_LINE_DELTA_PX = 16;
 const CHART_SOURCE_HIGHLIGHT_COLORS = ["#2563eb", "#dc2626", "#7c3aed", "#059669", "#ea580c", "#db2777"];
 const CHART_SOURCE_HIGHLIGHT_COLOR_BY_ROLE = {
@@ -1593,10 +1593,12 @@ function resolveAnchoredRect(
     rowIndexByActual?: Map<number, number>;
     rowHeaderWidth?: number;
     rowPrefixSums?: number[];
+    zoomFactor?: number;
   }
 ): XlsxImageRect {
   const headerHeight = options?.headerHeight ?? HEADER_HEIGHT;
   const rowHeaderWidth = options?.rowHeaderWidth ?? ROW_HEADER_WIDTH;
+  const anchorZoomFactor = options?.zoomFactor ?? 1;
   const resolveMarkerLeft = (col: number, colOffsetEmu: number) =>
     rowHeaderWidth +
     resolveAxisStartOffset(
@@ -1607,7 +1609,7 @@ function resolveAnchoredRect(
       options?.colPrefixSums,
       options?.actualColPrefixSums
     ) +
-    emuToPixels(colOffsetEmu);
+    emuToPixels(colOffsetEmu) * anchorZoomFactor;
   const resolveMarkerTop = (row: number, rowOffsetEmu: number) =>
     headerHeight +
     resolveAxisStartOffset(
@@ -1618,23 +1620,23 @@ function resolveAnchoredRect(
       options?.rowPrefixSums,
       options?.actualRowPrefixSums
     ) +
-    emuToPixels(rowOffsetEmu);
+    emuToPixels(rowOffsetEmu) * anchorZoomFactor;
 
   if (anchor.kind === "absolute") {
     return {
-      height: Math.max(1, emuToPixels(anchor.sizeEmu.cy)),
-      left: rowHeaderWidth + emuToPixels(anchor.positionEmu.x),
-      top: headerHeight + emuToPixels(anchor.positionEmu.y),
-      width: Math.max(1, emuToPixels(anchor.sizeEmu.cx))
+      height: Math.max(1, emuToPixels(anchor.sizeEmu.cy) * anchorZoomFactor),
+      left: rowHeaderWidth + emuToPixels(anchor.positionEmu.x) * anchorZoomFactor,
+      top: headerHeight + emuToPixels(anchor.positionEmu.y) * anchorZoomFactor,
+      width: Math.max(1, emuToPixels(anchor.sizeEmu.cx) * anchorZoomFactor)
     };
   }
 
   if (anchor.kind === "one-cell") {
     return {
-      height: Math.max(1, emuToPixels(anchor.sizeEmu.cy)),
+      height: Math.max(1, emuToPixels(anchor.sizeEmu.cy) * anchorZoomFactor),
       left: resolveMarkerLeft(anchor.from.col, anchor.from.colOffsetEmu),
       top: resolveMarkerTop(anchor.from.row, anchor.from.rowOffsetEmu),
-      width: Math.max(1, emuToPixels(anchor.sizeEmu.cx))
+      width: Math.max(1, emuToPixels(anchor.sizeEmu.cx) * anchorZoomFactor)
     };
   }
 
@@ -1666,6 +1668,7 @@ function resolveImageRect(
     rowIndexByActual?: Map<number, number>;
     rowHeaderWidth?: number;
     rowPrefixSums?: number[];
+    zoomFactor?: number;
   }
 ): XlsxImageRect {
   return resolveAnchoredRect(image.anchor, visibleRows, visibleCols, rowHeights, colWidths, options);
@@ -5182,6 +5185,8 @@ type PaintedBodyCanvasSignature = {
   palette: ViewerPalette;
   rowHeaderWidth: number;
   rowSignature: string;
+  viewportLeft: number;
+  viewportTop: number;
   zoomFactor: number;
 };
 
@@ -6826,6 +6831,7 @@ function XlsxGrid({
     src: string;
   }>());
   const selectionOverlayRef = React.useRef<HTMLDivElement>(null);
+  const canvasSelectionLayerRef = React.useRef<HTMLDivElement>(null);
   const activeValidationOverlayRef = React.useRef<HTMLDivElement>(null);
   const fillHandleRef = React.useRef<HTMLDivElement>(null);
   const tableMenuRef = React.useRef<HTMLDivElement>(null);
@@ -6850,9 +6856,11 @@ function XlsxGrid({
   const liveGestureZoomRef = React.useRef<LiveGestureZoomState | null>(null);
   const pendingLiveGestureZoomStateRef = React.useRef<LiveGestureZoomState | null>(null);
   const liveGestureZoomFrameRef = React.useRef<number | null>(null);
+  const liveGestureZoomTransformFrameRef = React.useRef<number | null>(null);
   const pendingZoomAnchorRef = React.useRef<ZoomAnchor | null>(null);
   const liveZoomCommitTimerRef = React.useRef<number | null>(null);
   const pendingLiveZoomCommitRef = React.useRef<number | null>(null);
+  const gestureScrollerRectRef = React.useRef<DOMRect | null>(null);
   const touchPinchStateRef = React.useRef<{ startDistance: number; startZoomScale: number } | null>(null);
   const safariPinchStartZoomRef = React.useRef<number | null>(null);
   const canvasTransformStyleCacheRef = React.useRef(new WeakMap<HTMLElement, {
@@ -7030,7 +7038,10 @@ function XlsxGrid({
   const setInteractionMode = React.useCallback((mode: "idle" | "fill" | "select") => {
     interactionModeRef.current = mode;
   }, []);
-  const worksheet = getActiveWorksheet();
+  const worksheet = React.useMemo(
+    () => getActiveWorksheet(),
+    [activeSheetIndex, getActiveWorksheet, revision]
+  );
   const mergedRegions = React.useMemo<XlsxCellRange[]>(() => {
     const regions: XlsxCellRange[] = [];
     const rawMergedRegions = Array.isArray(worksheet?.mergedRegions) ? worksheet.mergedRegions : [];
@@ -7117,13 +7128,37 @@ function XlsxGrid({
       : 1;
     const scrollDeltaX = paintedViewport.left - nextLiveViewport.left;
     const scrollDeltaY = paintedViewport.top - nextLiveViewport.top;
-    const liveZoomTranslateX = isLiveZooming
-      ? currentLiveGestureZoom.anchor.x * (1 - liveZoomScale)
-      : 0;
-    const liveZoomTranslateY = isLiveZooming
-      ? currentLiveGestureZoom.anchor.y * (1 - liveZoomScale)
-      : 0;
+    const resolveClampedLiveZoomAnchor = (
+      scrollOffset: number,
+      viewportSize: number,
+      scrollExtent: number,
+      gestureAnchor: number
+    ) => {
+      if (!isLiveZooming || liveZoomScale === 1) {
+        return gestureAnchor;
+      }
 
+      const targetScrollExtent = Math.max(viewportSize, scrollExtent * liveZoomScale);
+      const targetScrollOffset = clampValue(
+        ((scrollOffset + gestureAnchor) * liveZoomScale) - gestureAnchor,
+        0,
+        Math.max(0, targetScrollExtent - viewportSize)
+      );
+      return ((scrollOffset * liveZoomScale) - targetScrollOffset) / (1 - liveZoomScale);
+    };
+    const scroller = scrollRef.current;
+    const liveZoomAnchorX = resolveClampedLiveZoomAnchor(
+      nextLiveViewport.left,
+      nextLiveViewport.width,
+      scroller?.scrollWidth ?? nextLiveViewport.width,
+      currentLiveGestureZoom?.anchor.x ?? 0
+    );
+    const liveZoomAnchorY = resolveClampedLiveZoomAnchor(
+      nextLiveViewport.top,
+      nextLiveViewport.height,
+      scroller?.scrollHeight ?? nextLiveViewport.height,
+      currentLiveGestureZoom?.anchor.y ?? 0
+    );
     const applyElementTransform = (
       element: HTMLElement | null,
       transform: string,
@@ -7153,11 +7188,25 @@ function XlsxGrid({
         willChange
       });
     };
+    const resolveLiveTranslation = (
+      baseTranslation: number,
+      anchor: number,
+      origin: number
+    ) => (
+      (baseTranslation * liveZoomScale)
+      + ((anchor - origin) * (1 - liveZoomScale))
+    );
     const applyCanvasTransform = (
       canvas: HTMLCanvasElement | null,
-      translateX: number,
-      translateY: number
+      baseTranslateX: number,
+      baseTranslateY: number,
+      originX: number,
+      originY: number,
+      anchorX: number,
+      anchorY: number
     ) => {
+      const translateX = resolveLiveTranslation(baseTranslateX, anchorX, originX);
+      const translateY = resolveLiveTranslation(baseTranslateY, anchorY, originY);
       const shouldTransform = translateX !== 0 || translateY !== 0 || liveZoomScale !== 1;
       applyElementTransform(
         canvas,
@@ -7167,98 +7216,194 @@ function XlsxGrid({
     };
     const applyOverlayTransform = (
       element: HTMLDivElement | null,
-      translateX: number,
-      translateY: number
+      baseTranslateX: number,
+      baseTranslateY: number,
+      paneLeft: number,
+      paneTop: number,
+      anchorX: number,
+      anchorY: number
     ) => {
+      const translateX = resolveLiveTranslation(baseTranslateX, anchorX, paneLeft);
+      const translateY = resolveLiveTranslation(baseTranslateY, anchorY, paneTop);
       applyElementTransform(
         element,
         liveZoomScale !== 1
-          ? `translate3d(${translateX + liveZoomTranslateX}px, ${translateY + liveZoomTranslateY}px, 0) scale(${liveZoomScale})`
-          : `translate3d(${translateX}px, ${translateY}px, 0)`,
+          ? `translate3d(${translateX}px, ${translateY}px, 0) scale(${liveZoomScale})`
+          : `translate3d(${baseTranslateX}px, ${baseTranslateY}px, 0)`,
         "transform",
         "0 0"
       );
     };
+    const liveScrollBodyViewportWidth = Math.max(0, nextLiveViewport.width - liveFrozenPaneRight);
+    const liveScrollBodyViewportHeight = Math.max(0, nextLiveViewport.height - liveFrozenPaneBottom);
+    const liveScrollBodyCanvasLeft = liveFrozenPaneRight
+      - Math.min(CANVAS_SCROLL_BUFFER_PX, liveScrollBodyViewportWidth);
+    const liveScrollBodyCanvasTop = liveFrozenPaneBottom
+      - Math.min(CANVAS_SCROLL_BUFFER_PX, liveScrollBodyViewportHeight);
+    const selectionLayerTranslateX = (nextLiveViewport.left + liveZoomAnchorX) * (1 - liveZoomScale);
+    const selectionLayerTranslateY = (nextLiveViewport.top + liveZoomAnchorY) * (1 - liveZoomScale);
+    const shouldTransformSelectionLayer = experimentalCanvas && isLiveZooming && liveZoomScale !== 1;
+
+    applyElementTransform(
+      canvasSelectionLayerRef.current,
+      shouldTransformSelectionLayer
+        ? `translate3d(${selectionLayerTranslateX}px, ${selectionLayerTranslateY}px, 0) scale(${liveZoomScale})`
+        : "",
+      shouldTransformSelectionLayer ? "transform" : "",
+      "0 0"
+    );
 
     applyCanvasTransform(
       scrollBodyCanvasRef.current,
-      scrollDeltaX + liveZoomTranslateX,
-      scrollDeltaY + liveZoomTranslateY
+      scrollDeltaX,
+      scrollDeltaY,
+      liveScrollBodyCanvasLeft,
+      liveScrollBodyCanvasTop,
+      liveZoomAnchorX,
+      liveZoomAnchorY
     );
     applyCanvasTransform(
       topBodyCanvasRef.current,
-      scrollDeltaX + liveZoomTranslateX,
-      liveZoomTranslateY
+      scrollDeltaX,
+      0,
+      liveScrollBodyCanvasLeft,
+      liveDisplayHeaderHeight,
+      liveZoomAnchorX,
+      0
     );
     applyCanvasTransform(
       leftBodyCanvasRef.current,
-      liveZoomTranslateX,
-      scrollDeltaY + liveZoomTranslateY
+      0,
+      scrollDeltaY,
+      liveDisplayRowHeaderWidth,
+      liveScrollBodyCanvasTop,
+      0,
+      liveZoomAnchorY
     );
     applyCanvasTransform(
       cornerBodyCanvasRef.current,
-      liveZoomTranslateX,
-      liveZoomTranslateY
+      0,
+      0,
+      liveDisplayRowHeaderWidth,
+      liveDisplayHeaderHeight,
+      0,
+      0
     );
 
     applyCanvasTransform(
       topScrollHeaderCanvasRef.current,
-      scrollDeltaX + liveZoomTranslateX,
-      liveZoomTranslateY
+      scrollDeltaX,
+      0,
+      liveScrollBodyCanvasLeft,
+      0,
+      liveZoomAnchorX,
+      0
     );
     applyCanvasTransform(
       topFrozenHeaderCanvasRef.current,
-      liveZoomTranslateX,
-      liveZoomTranslateY
+      0,
+      0,
+      liveDisplayRowHeaderWidth,
+      0,
+      0,
+      0
     );
     applyCanvasTransform(
       leftScrollHeaderCanvasRef.current,
-      liveZoomTranslateX,
-      scrollDeltaY + liveZoomTranslateY
+      0,
+      scrollDeltaY,
+      0,
+      liveScrollBodyCanvasTop,
+      0,
+      liveZoomAnchorY
     );
     applyCanvasTransform(
       leftFrozenHeaderCanvasRef.current,
-      liveZoomTranslateX,
-      liveZoomTranslateY
+      0,
+      0,
+      0,
+      liveDisplayHeaderHeight,
+      0,
+      0
     );
     applyCanvasTransform(
       cornerHeaderCanvasRef.current,
-      liveZoomTranslateX,
-      liveZoomTranslateY
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
     );
     applyOverlayTransform(
       canvasScrollOverlayContentRef.current,
       -nextLiveViewport.left - liveFrozenPaneRight,
-      -nextLiveViewport.top - liveFrozenPaneBottom
+      -nextLiveViewport.top - liveFrozenPaneBottom,
+      liveFrozenPaneRight,
+      liveFrozenPaneBottom,
+      liveZoomAnchorX,
+      liveZoomAnchorY
     );
     applyOverlayTransform(
       canvasTopOverlayContentRef.current,
       -nextLiveViewport.left - liveFrozenPaneRight,
-      -liveDisplayHeaderHeight
+      -liveDisplayHeaderHeight,
+      liveFrozenPaneRight,
+      liveDisplayHeaderHeight,
+      liveZoomAnchorX,
+      0
     );
     applyOverlayTransform(
       canvasLeftOverlayContentRef.current,
       -liveDisplayRowHeaderWidth,
-      -nextLiveViewport.top - liveFrozenPaneBottom
+      -nextLiveViewport.top - liveFrozenPaneBottom,
+      liveDisplayRowHeaderWidth,
+      liveFrozenPaneBottom,
+      0,
+      liveZoomAnchorY
     );
     applyOverlayTransform(
       canvasCornerOverlayContentRef.current,
       -liveDisplayRowHeaderWidth,
-      -liveDisplayHeaderHeight
+      -liveDisplayHeaderHeight,
+      liveDisplayRowHeaderWidth,
+      liveDisplayHeaderHeight,
+      0,
+      0
     );
-  }, [zoomScale]);
+  }, [experimentalCanvas, zoomScale]);
   const updateLiveGestureZoomState = React.useCallback((
     nextState:
       | LiveGestureZoomState
       | null
       | ((current: LiveGestureZoomState | null) => LiveGestureZoomState | null)
   ) => {
+    const previousState = liveGestureZoomRef.current;
     const resolvedState = typeof nextState === "function"
-      ? nextState(liveGestureZoomRef.current)
+      ? nextState(previousState)
       : nextState;
     liveGestureZoomRef.current = resolvedState;
+    const shouldApplyTransformImmediately = !experimentalCanvas || previousState === null || resolvedState === null;
+    if (shouldApplyTransformImmediately) {
+      if (liveGestureZoomTransformFrameRef.current !== null) {
+        window.cancelAnimationFrame(liveGestureZoomTransformFrameRef.current);
+        liveGestureZoomTransformFrameRef.current = null;
+      }
+      applyCanvasViewportCompensation();
+    } else if (liveGestureZoomTransformFrameRef.current === null) {
+      liveGestureZoomTransformFrameRef.current = window.requestAnimationFrame(() => {
+        liveGestureZoomTransformFrameRef.current = null;
+        applyCanvasViewportCompensation();
+      });
+    }
+    // Canvas zoom is compositor-driven; React only needs gesture activity changes
+    // so selection geometry transitions stay disabled through the commit frame.
+    const shouldSyncReactState = !experimentalCanvas || (previousState === null) !== (resolvedState === null);
+    if (!shouldSyncReactState) {
+      return;
+    }
+
     pendingLiveGestureZoomStateRef.current = resolvedState;
-    applyCanvasViewportCompensation();
     if (liveGestureZoomFrameRef.current !== null) {
       return;
     }
@@ -7268,7 +7413,7 @@ function XlsxGrid({
       pendingLiveGestureZoomStateRef.current = null;
       setLiveGestureZoom(pendingState);
     });
-  }, [applyCanvasViewportCompensation]);
+  }, [applyCanvasViewportCompensation, experimentalCanvas]);
   const clearLiveZoomCommitTimer = React.useCallback(() => {
     if (liveZoomCommitTimerRef.current !== null) {
       window.clearTimeout(liveZoomCommitTimerRef.current);
@@ -7281,6 +7426,7 @@ function XlsxGrid({
     pendingZoomAnchorRef.current = null;
     touchPinchStateRef.current = null;
     safariPinchStartZoomRef.current = null;
+    gestureScrollerRectRef.current = null;
     gestureZoomScaleRef.current = committedZoomScaleRef.current;
     updateLiveGestureZoomState(null);
   }, [clearLiveZoomCommitTimer, updateLiveGestureZoomState]);
@@ -8013,6 +8159,10 @@ function XlsxGrid({
       window.cancelAnimationFrame(liveGestureZoomFrameRef.current);
       liveGestureZoomFrameRef.current = null;
     }
+    if (liveGestureZoomTransformFrameRef.current !== null) {
+      window.cancelAnimationFrame(liveGestureZoomTransformFrameRef.current);
+      liveGestureZoomTransformFrameRef.current = null;
+    }
     if (drawingViewportFrameRef.current !== null) {
       window.cancelAnimationFrame(drawingViewportFrameRef.current);
       drawingViewportFrameRef.current = null;
@@ -8304,6 +8454,7 @@ function XlsxGrid({
   const handleScrollerScroll = React.useCallback((event: React.UIEvent<HTMLDivElement>) => {
     const currentScroller = event.currentTarget;
     cachedScrollerRectRef.current = null;
+    gestureScrollerRectRef.current = null;
     const paintedViewport = paintedDrawingViewportRef.current;
     const shouldSyncDrawingViewportImmediately =
       Math.abs(currentScroller.scrollLeft - paintedViewport.left) > CANVAS_IMMEDIATE_VIEWPORT_SYNC_THRESHOLD_PX
@@ -8351,7 +8502,9 @@ function XlsxGrid({
       }
 
       event.preventDefault();
-      const anchor = resolveEventAnchor(event.clientX, event.clientY, scroller.getBoundingClientRect());
+      const scrollerRect = gestureScrollerRectRef.current ?? scroller.getBoundingClientRect();
+      gestureScrollerRectRef.current = scrollerRect;
+      const anchor = resolveEventAnchor(event.clientX, event.clientY, scrollerRect);
       updateLiveGestureZoomTarget(
         gestureZoomScaleRef.current * Math.exp(-delta * WHEEL_ZOOM_SENSITIVITY),
         anchor
@@ -8375,10 +8528,12 @@ function XlsxGrid({
       }
 
       event.preventDefault();
+      const scrollerRect = scroller.getBoundingClientRect();
+      gestureScrollerRectRef.current = scrollerRect;
       const anchor = resolveEventAnchor(
         (firstTouch.clientX + secondTouch.clientX) / 2,
         (firstTouch.clientY + secondTouch.clientY) / 2,
-        scroller.getBoundingClientRect()
+        scrollerRect
       );
       clearLiveZoomCommitTimer();
       updateLiveGestureZoomState({
@@ -8410,10 +8565,12 @@ function XlsxGrid({
       }
 
       event.preventDefault();
+      const scrollerRect = gestureScrollerRectRef.current ?? scroller.getBoundingClientRect();
+      gestureScrollerRectRef.current = scrollerRect;
       const anchor = resolveEventAnchor(
         (firstTouch.clientX + secondTouch.clientX) / 2,
         (firstTouch.clientY + secondTouch.clientY) / 2,
-        scroller.getBoundingClientRect()
+        scrollerRect
       );
       updateLiveGestureZoomTarget(
         (pinchState.startZoomScale * distance) / pinchState.startDistance,
@@ -8437,10 +8594,12 @@ function XlsxGrid({
     const handleGestureStart = (event: Event) => {
       const gestureEvent = event as WebKitGestureEvent;
       event.preventDefault();
+      const scrollerRect = scroller.getBoundingClientRect();
+      gestureScrollerRectRef.current = scrollerRect;
       const anchor = resolveEventAnchor(
         gestureEvent.clientX,
         gestureEvent.clientY,
-        scroller.getBoundingClientRect()
+        scrollerRect
       );
       clearLiveZoomCommitTimer();
       safariPinchStartZoomRef.current = committedZoomScaleRef.current;
@@ -8460,10 +8619,12 @@ function XlsxGrid({
       }
 
       event.preventDefault();
+      const scrollerRect = gestureScrollerRectRef.current ?? scroller.getBoundingClientRect();
+      gestureScrollerRectRef.current = scrollerRect;
       const anchor = resolveEventAnchor(
         gestureEvent.clientX,
         gestureEvent.clientY,
-        scroller.getBoundingClientRect()
+        scrollerRect
       );
       updateLiveGestureZoomTarget(startZoomScale * gestureEvent.scale, anchor);
     };
@@ -9693,7 +9854,8 @@ function XlsxGrid({
                     headerHeight: displayHeaderHeight,
                     rowIndexByActual,
                     rowHeaderWidth: displayRowHeaderWidth,
-                    rowPrefixSums
+                    rowPrefixSums,
+                    zoomFactor
                   })
           }))
         : [],
@@ -9712,7 +9874,8 @@ function XlsxGrid({
       rowPrefixSums,
       showImages,
       visibleCols,
-      visibleRows
+      visibleRows,
+      zoomFactor
     ]
   );
   const shapeRects = React.useMemo(
@@ -9727,7 +9890,8 @@ function XlsxGrid({
               headerHeight: displayHeaderHeight,
               rowIndexByActual,
               rowHeaderWidth: displayRowHeaderWidth,
-              rowPrefixSums
+              rowPrefixSums,
+              zoomFactor
             }),
             shape
           }))
@@ -9746,7 +9910,8 @@ function XlsxGrid({
       shapes,
       showImages,
       visibleCols,
-      visibleRows
+      visibleRows,
+      zoomFactor
     ]
   );
   const formControlRects = React.useMemo(
@@ -9764,7 +9929,8 @@ function XlsxGrid({
               headerHeight: displayHeaderHeight,
               rowIndexByActual,
               rowHeaderWidth: displayRowHeaderWidth,
-              rowPrefixSums
+              rowPrefixSums,
+              zoomFactor
             })
           }))
         : [],
@@ -9782,7 +9948,8 @@ function XlsxGrid({
       rowPrefixSums,
       showImages,
       visibleCols,
-      visibleRows
+      visibleRows,
+      zoomFactor
     ]
   );
   const chartRects = React.useMemo(
@@ -9801,7 +9968,8 @@ function XlsxGrid({
                     headerHeight: displayHeaderHeight,
                     rowIndexByActual,
                     rowHeaderWidth: displayRowHeaderWidth,
-                    rowPrefixSums
+                    rowPrefixSums,
+                    zoomFactor
                   })
           }))
         : [],
@@ -9820,7 +9988,8 @@ function XlsxGrid({
       rowPrefixSums,
       showImages,
       visibleCols,
-      visibleRows
+      visibleRows,
+      zoomFactor
     ]
   );
   const shouldBakeCanvasStaticDrawings = Boolean(experimentalCanvas && readOnly && showImages);
@@ -11589,6 +11758,8 @@ function XlsxGrid({
       palette,
       rowHeaderWidth,
       rowSignature: buildRenderedAxisSignature(canvasVisibleRowItems, (item) => item.index),
+      viewportLeft: drawingViewport.left,
+      viewportTop: drawingViewport.top,
       zoomFactor
     };
     const nextHeaderCanvasSignature: PaintedHeaderCanvasSignature = {
@@ -11620,6 +11791,8 @@ function XlsxGrid({
       && previousBodyCanvasSignature.palette === nextBodyCanvasSignature.palette
       && previousBodyCanvasSignature.rowHeaderWidth === nextBodyCanvasSignature.rowHeaderWidth
       && previousBodyCanvasSignature.rowSignature === nextBodyCanvasSignature.rowSignature
+      && previousBodyCanvasSignature.viewportLeft === nextBodyCanvasSignature.viewportLeft
+      && previousBodyCanvasSignature.viewportTop === nextBodyCanvasSignature.viewportTop
       && previousBodyCanvasSignature.zoomFactor === nextBodyCanvasSignature.zoomFactor
     );
     const shouldRepaintHeaders = !(
@@ -13166,7 +13339,8 @@ function XlsxGrid({
   const headerLabelLiveScale = isLiveZooming ? liveZoomScale : 1;
   const selectionBorderWidth = Math.max(1, zoomFactor);
   const shouldAnimateCanvasSelection = experimentalCanvas && enableCanvasSelectionAnimation;
-  const canvasSelectionTransition = shouldAnimateCanvasSelection
+  const shouldAnimateCanvasSelectionGeometry = shouldAnimateCanvasSelection && liveGestureZoom === null;
+  const canvasSelectionTransition = shouldAnimateCanvasSelectionGeometry
     ? "left 120ms cubic-bezier(0.22, 1, 0.36, 1), top 120ms cubic-bezier(0.22, 1, 0.36, 1), width 120ms cubic-bezier(0.22, 1, 0.36, 1), height 120ms cubic-bezier(0.22, 1, 0.36, 1), opacity 100ms linear"
     : "none";
   const rowColSpan = renderedCols.length + 1 + (leadingColumnSpacerWidth > 0 ? 1 : 0) + (trailingColumnSpacerWidth > 0 ? 1 : 0);
@@ -15497,77 +15671,93 @@ function XlsxGrid({
               </table>
             )}
             <div
-              ref={selectionOverlayRef}
+              ref={canvasSelectionLayerRef}
               style={{
-                backgroundColor: selectionFill,
-                boxSizing: "border-box",
-                boxShadow: `inset 0 0 0 ${selectionBorderWidth}px ${selectionStroke}`,
-                contain: "layout paint",
-                height: resolvedSelectionOverlay?.height ?? 0,
-                left: resolvedSelectionOverlay?.left ?? 0,
-                opacity: resolvedSelectionOverlay ? 1 : 0,
+                height: 0,
+                left: 0,
+                overflow: "visible",
                 pointerEvents: "none",
                 position: "absolute",
-                top: resolvedSelectionOverlay?.top ?? 0,
-                transition: canvasSelectionTransition,
-                visibility: resolvedSelectionOverlay ? "visible" : "hidden",
-                willChange: shouldAnimateCanvasSelection ? "left, top, width, height" : undefined,
-                width: resolvedSelectionOverlay?.width ?? 0,
+                top: 0,
+                transformOrigin: "0 0",
+                transition: "none",
+                width: 0,
                 zIndex: 24
               }}
-            />
-            <div
-              ref={activeValidationOverlayRef}
-              aria-hidden="true"
-              style={{
-                alignItems: "center",
-                color: palette.mutedText,
-                display: "inline-flex",
-                fontSize: 10 * zoomFactor,
-                fontWeight: 700,
-                height: 16 * zoomFactor,
-                justifyContent: "center",
-                opacity: 0,
-                pointerEvents: "none",
-                position: "absolute",
-                transform: "translateY(-50%)",
-                visibility: "hidden",
-                width: 12 * zoomFactor,
-                zIndex: 26
-              }}
             >
-              ▾
-            </div>
-            <div
-              ref={fillHandleRef}
-              onPointerDown={(event) => {
-                if (readOnly || event.button !== 0 || !normalizedSelection || !resolvedSelectionOverlay) {
-                  return;
-                }
+              <div
+                ref={selectionOverlayRef}
+                style={{
+                  backgroundColor: selectionFill,
+                  boxSizing: "border-box",
+                  boxShadow: `inset 0 0 0 ${selectionBorderWidth}px ${selectionStroke}`,
+                  contain: "layout paint",
+                  height: resolvedSelectionOverlay?.height ?? 0,
+                  left: resolvedSelectionOverlay?.left ?? 0,
+                  opacity: resolvedSelectionOverlay ? 1 : 0,
+                  pointerEvents: "none",
+                  position: "absolute",
+                  top: resolvedSelectionOverlay?.top ?? 0,
+                  transition: canvasSelectionTransition,
+                  visibility: resolvedSelectionOverlay ? "visible" : "hidden",
+                  willChange: shouldAnimateCanvasSelectionGeometry ? "left, top, width, height" : undefined,
+                  width: resolvedSelectionOverlay?.width ?? 0,
+                  zIndex: 24
+                }}
+              />
+              <div
+                ref={activeValidationOverlayRef}
+                aria-hidden="true"
+                style={{
+                  alignItems: "center",
+                  color: palette.mutedText,
+                  display: "inline-flex",
+                  fontSize: 10 * zoomFactor,
+                  fontWeight: 700,
+                  height: 16 * zoomFactor,
+                  justifyContent: "center",
+                  opacity: 0,
+                  pointerEvents: "none",
+                  position: "absolute",
+                  transform: "translateY(-50%)",
+                  visibility: "hidden",
+                  width: 12 * zoomFactor,
+                  zIndex: 26
+                }}
+              >
+                ▾
+              </div>
+              <div
+                ref={fillHandleRef}
+                onPointerDown={(event) => {
+                  if (readOnly || event.button !== 0 || !normalizedSelection || !resolvedSelectionOverlay) {
+                    return;
+                  }
 
-                event.preventDefault();
-                event.stopPropagation();
-                startFillDrag(event.pointerId, normalizedSelection);
-              }}
-              style={{
-                backgroundColor: selectionStroke,
-                border: `${Math.max(1, zoomFactor)}px solid ${palette.surface}`,
-                contain: "layout paint",
-                cursor: "crosshair",
-                display: !readOnly && resolvedSelectionOverlay ? "block" : "none",
-                height: 8 * zoomFactor,
-                left: resolvedSelectionOverlay ? resolvedSelectionOverlay.left + resolvedSelectionOverlay.width - (4 * zoomFactor) : 0,
-                pointerEvents: "auto",
-                position: "absolute",
-                top: resolvedSelectionOverlay ? resolvedSelectionOverlay.top + resolvedSelectionOverlay.height - (4 * zoomFactor) : 0,
-                transition: shouldAnimateCanvasSelection
-                  ? "left 120ms cubic-bezier(0.22, 1, 0.36, 1), top 120ms cubic-bezier(0.22, 1, 0.36, 1)"
-                  : "none",
-                willChange: shouldAnimateCanvasSelection ? "left, top" : undefined,
-                width: 8 * zoomFactor,
-                zIndex: 25
-              }}
-            />
+                  event.preventDefault();
+                  event.stopPropagation();
+                  startFillDrag(event.pointerId, normalizedSelection);
+                }}
+                style={{
+                  backgroundColor: selectionStroke,
+                  border: `${Math.max(1, zoomFactor)}px solid ${palette.surface}`,
+                  contain: "layout paint",
+                  cursor: "crosshair",
+                  display: !readOnly && resolvedSelectionOverlay ? "block" : "none",
+                  height: 8 * zoomFactor,
+                  left: resolvedSelectionOverlay ? resolvedSelectionOverlay.left + resolvedSelectionOverlay.width - (4 * zoomFactor) : 0,
+                  pointerEvents: "auto",
+                  position: "absolute",
+                  top: resolvedSelectionOverlay ? resolvedSelectionOverlay.top + resolvedSelectionOverlay.height - (4 * zoomFactor) : 0,
+                  transition: shouldAnimateCanvasSelectionGeometry
+                    ? "left 120ms cubic-bezier(0.22, 1, 0.36, 1), top 120ms cubic-bezier(0.22, 1, 0.36, 1)"
+                    : "none",
+                  willChange: shouldAnimateCanvasSelectionGeometry ? "left, top" : undefined,
+                  width: 8 * zoomFactor,
+                  zIndex: 25
+                }}
+              />
+            </div>
             {resizeGuide ? (
               <div
                 aria-hidden="true"
