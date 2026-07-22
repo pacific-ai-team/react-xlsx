@@ -53,10 +53,13 @@ const DEFAULT_COL_WIDTH = 80;
 const HEADER_HEIGHT = 24;
 const ROW_HEADER_WIDTH = 40;
 const INTERNAL_CLIPBOARD_MIME = "application/x-react-xlsx-range+json";
-const MIN_OPEN_GRID_ROWS = 200;
-const MIN_OPEN_GRID_COLS = 50;
-const OPEN_GRID_ROW_PADDING = 120;
-const OPEN_GRID_COL_PADDING = 24;
+// Pacific fork: rows fill a tall viewer without a huge overscroll void;
+// columns stay tight so you can't drag far past the last used column.
+// (upstream defaults were 200 / 50 / 120 / 24)
+const MIN_OPEN_GRID_ROWS = 100;
+const MIN_OPEN_GRID_COLS = 15;
+const OPEN_GRID_ROW_PADDING = 15;
+const OPEN_GRID_COL_PADDING = 3;
 const INITIAL_WORKER_GRID_ROWS = 600;
 const INITIAL_WORKER_GRID_COLS = 120;
 const WORKER_GRID_GROW_ROWS = 2000;
@@ -1219,9 +1222,13 @@ function resolveDarkModeSurface(themePalette: XlsxSheetData["themePalette"] | un
 }
 
 function resolveSheetSurface(sheet: XlsxSheetData | null, palette: ViewerPalette) {
+  // Pacific fork: paint the sheet paper white in light mode. Excel renders
+  // unfilled cells white regardless of the theme's Background-1 color; some
+  // models repurpose that theme slot (e.g. a blue value), which upstream would
+  // otherwise wash the whole grid. Dark mode unchanged.
   return paletteIsDark(palette)
     ? resolveDarkModeSurface(sheet?.themePalette, palette)
-    : sheet?.themePalette.colorsByIndex[0] ?? SHEET_SURFACE;
+    : SHEET_SURFACE;
 }
 
 function normalizeRange(range: XlsxCellRange): XlsxCellRange {
@@ -3561,9 +3568,12 @@ function buildCellStyle(
   options?: { showGridLines?: boolean }
 ): React.CSSProperties {
   const showGridLines = options?.showGridLines ?? true;
+  // Pacific fork: default per-cell background is white in light mode (see
+  // resolveSheetSurface) so unfilled cells don't inherit a repurposed theme
+  // Background-1 color.
   const baseSurface = paletteIsDark(palette)
     ? resolveDarkModeSurface(themePalette, palette)
-    : themePalette?.colorsByIndex[0] ?? SHEET_SURFACE;
+    : SHEET_SURFACE;
   const gridlineShadow = showGridLines ? buildGridlineShadow(palette.border) : undefined;
   const css: React.CSSProperties = {
     backgroundColor: baseSurface,
