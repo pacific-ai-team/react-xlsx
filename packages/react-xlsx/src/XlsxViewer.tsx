@@ -56,8 +56,15 @@ const INTERNAL_CLIPBOARD_MIME = "application/x-react-xlsx-range+json";
 // Pacific fork: rows fill a tall viewer without a huge overscroll void;
 // columns stay tight so you can't drag far past the last used column.
 // (upstream defaults were 200 / 50 / 120 / 24)
+// MIN_* set the grid's floor for a sparse/empty sheet. They only matter when a
+// sheet has little content — a content-rich sheet's used range + padding
+// already exceeds them. Kept high enough that the empty grid (with gridlines)
+// FILLS a wide viewer instead of stopping partway across, which looked broken
+// on separator tabs like "Argus>>" (only ~15 columns of gridlines, blank white
+// to the right). Rows: 100 fills tall panels; cols: 40 (~A..AN) fills a wide
+// full-page viewer.
 const MIN_OPEN_GRID_ROWS = 100;
-const MIN_OPEN_GRID_COLS = 15;
+const MIN_OPEN_GRID_COLS = 40;
 const OPEN_GRID_ROW_PADDING = 15;
 const OPEN_GRID_COL_PADDING = 3;
 const INITIAL_WORKER_GRID_ROWS = 600;
@@ -74,6 +81,21 @@ const SELECTION_DRAG_THRESHOLD_PX = 4;
 const IMAGE_MIN_SIZE_PX = 16;
 const IMAGE_HANDLE_SIZE_PX = 10;
 const CANVAS_RESIZE_HIT_SLOP_PX = 8;
+// INVARIANT: CANVAS_VIEWPORT_OVERSCAN_PX must stay <= CANVAS_SCROLL_BUFFER_PX.
+// The scroll buffer sizes how far past the viewport the canvas is actually
+// painted (canvas backing = viewport + buffer*2), while the overscan sizes the
+// cell-paint range AND the repaint cache bucket (drawingViewportCacheSignature
+// buckets by overscan). If overscan > buffer, the cache says "still valid"
+// while you've already scrolled past the painted canvas — vertical scroll (tall
+// sheets) blanks between buffer..overscan then jumps on repaint. Keep them equal.
+//
+// Pacific fork: kept at the upstream 480 (NOT widened). A larger band persists
+// more painted cells for back-scroll, but the canvas backing grows with it
+// (viewport + buffer*2), so every boundary repaint paints a much bigger canvas
+// and the periodic hitch reads as jerky forward-scrolling. 480 keeps each
+// repaint cheap; intra-band scrolling is smooth via canvas transform
+// compensation regardless. (The scrollbar "jump" was a separate bug — the
+// read-only open-grid growth cap in handleScrollerScroll — not this band.)
 const CANVAS_VIEWPORT_OVERSCAN_PX = 480;
 const CANVAS_SCROLL_BUFFER_PX = 480;
 const CANVAS_DEFERRED_VIEWPORT_SYNC_THRESHOLD_PX = CANVAS_SCROLL_BUFFER_PX - 96;
@@ -7096,12 +7118,21 @@ function XlsxGrid({
   const zoomFactor = React.useMemo(() => Math.max(0.1, zoomScale / 100), [zoomScale]);
   const previousZoomFactorRef = React.useRef(zoomFactor);
   const effectiveTables = tables;
+  // Pacific fork: a read-only viewer must have a FIXED-size grid so the
+  // scrollbar thumb never resizes. Worker mode normally starts with a capped
+  // grid (INITIAL_WORKER_GRID_ROWS) and grows it as you scroll — great for an
+  // editable infinite sheet, but it makes the read-only citation viewer's
+  // scrollbar jump and can leave a cited row beyond the initial cap. So for
+  // read-only we bypass the worker cap and start at full extent; the worker
+  // still lazy-loads row *data* for smooth scrolling, independent of the grid's
+  // dimensions.
+  const useWorkerGridCap = Boolean(isWorkerBacked) && !readOnly;
   const [displayRowLimit, setDisplayRowLimit] = React.useState(() =>
     resolveInitialDisplayExtent(
       activeSheet?.maxUsedRow ?? -1,
       MIN_OPEN_GRID_ROWS,
       OPEN_GRID_ROW_PADDING,
-      Boolean(isWorkerBacked),
+      useWorkerGridCap,
       INITIAL_WORKER_GRID_ROWS
     )
   );
@@ -7110,7 +7141,7 @@ function XlsxGrid({
       activeSheet?.maxUsedCol ?? -1,
       MIN_OPEN_GRID_COLS,
       OPEN_GRID_COL_PADDING,
-      Boolean(isWorkerBacked),
+      useWorkerGridCap,
       INITIAL_WORKER_GRID_COLS
     )
   );
@@ -8474,8 +8505,19 @@ function XlsxGrid({
       OPEN_GRID_VERTICAL_EDGE_PX
     ) {
       setDisplayRowLimit((current) => {
-        const nextLimit = current + OPEN_GRID_ROW_GROWTH;
-        return readOnly && current < maxRowDisplayLimit ? Math.min(maxRowDisplayLimit, nextLimit) : nextLimit;
+        // Pacific fork: read-only (viewer) mode must keep a FIXED grid. The
+        // original logic only capped while current < max, but a viewer starts
+        // AT max (init === fullExtent), so it fell through to unbounded growth
+        // on the first scroll-to-bottom — the scroll height kept expanding and
+        // the scrollbar thumb visibly shrank/jumped as you scrolled down. Cap
+        // at maxRowDisplayLimit and bail out (return current) once reached;
+        // editable mode keeps the Excel-style infinite grid.
+        if (readOnly) {
+          return current >= maxRowDisplayLimit
+            ? current
+            : Math.min(maxRowDisplayLimit, current + OPEN_GRID_ROW_GROWTH);
+        }
+        return current + OPEN_GRID_ROW_GROWTH;
       });
     }
 
@@ -8484,8 +8526,12 @@ function XlsxGrid({
       OPEN_GRID_HORIZONTAL_EDGE_PX
     ) {
       setDisplayColLimit((current) => {
-        const nextLimit = current + OPEN_GRID_COL_GROWTH;
-        return readOnly && current < maxColDisplayLimit ? Math.min(maxColDisplayLimit, nextLimit) : nextLimit;
+        if (readOnly) {
+          return current >= maxColDisplayLimit
+            ? current
+            : Math.min(maxColDisplayLimit, current + OPEN_GRID_COL_GROWTH);
+        }
+        return current + OPEN_GRID_COL_GROWTH;
       });
     }
   }, [maxColDisplayLimit, maxRowDisplayLimit, readOnly, syncDrawingViewport]);
@@ -9683,13 +9729,27 @@ function XlsxGrid({
       return null;
     }
 
+    // Pacific fork: frozen-pane cells stay pinned, but the selection overlay
+    // lives in a scroll-translated layer — so a frozen cell's overlay drifted
+    // by the scroll offset (highlight landed left of / above the cited cell).
+    // Position it at the cell's sticky offset (same maps the cells use) plus
+    // the current scroll offset to counteract the layer translation.
+    const stickyLeft = stickyLeftByCol.get(normalized.start.col);
+    const stickyTop = stickyTopByRow.get(normalized.start.row);
+
     return {
       height: sumPrefixRange(rowPrefixSums, startRowIndex, endRowIndex),
-      left: displayRowHeaderWidth + sumPrefixRange(colPrefixSums, 0, startColIndex - 1),
-      top: displayHeaderHeight + sumPrefixRange(rowPrefixSums, 0, startRowIndex - 1),
+      left:
+        stickyLeft !== undefined
+          ? stickyLeft + drawingViewport.left
+          : displayRowHeaderWidth + sumPrefixRange(colPrefixSums, 0, startColIndex - 1),
+      top:
+        stickyTop !== undefined
+          ? stickyTop + drawingViewport.top
+          : displayHeaderHeight + sumPrefixRange(rowPrefixSums, 0, startRowIndex - 1),
       width: sumPrefixRange(colPrefixSums, startColIndex, endColIndex)
     };
-  }, [colIndexByActual, colPrefixSums, displayHeaderHeight, displayRowHeaderWidth, displayedSelection, rowIndexByActual, rowPrefixSums]);
+  }, [colIndexByActual, colPrefixSums, displayHeaderHeight, displayRowHeaderWidth, displayedSelection, drawingViewport.left, drawingViewport.top, rowIndexByActual, rowPrefixSums, stickyLeftByCol, stickyTopByRow]);
   const resolvedSelectionOverlay = selectionOverlay;
   const { fill: selectionFill, header: selectionHeaderSurface, stroke: selectionStroke } = React.useMemo(() => resolveSelectionColors({
     palette,
