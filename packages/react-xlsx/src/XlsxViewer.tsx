@@ -6736,10 +6736,13 @@ function XlsxGrid({
   selectionColor,
   selectionFillColor,
   selectionHeaderColor,
-  showImages = true
+  showCharts,
+  showFormControls,
+  showImages = true,
+  showShapes
 }: Pick<
   XlsxViewerProps,
-  "allowResizeInReadOnly" | "emptyState" | "enableCanvasSelectionAnimation" | "enableGestureZoom" | "errorState" | "experimentalCanvas" | "fileTooLargeState" | "getCellStyle" | "loadingComponent" | "loadingState" | "onFormControlAction" | "onFormControlChange" | "renderChartLoading" | "renderFormControl" | "renderImage" | "renderImageSelection" | "renderScroller" | "renderTableHeaderMenu" | "selectionColor" | "selectionFillColor" | "selectionHeaderColor" | "showImages"
+  "allowResizeInReadOnly" | "emptyState" | "enableCanvasSelectionAnimation" | "enableGestureZoom" | "errorState" | "experimentalCanvas" | "fileTooLargeState" | "getCellStyle" | "loadingComponent" | "loadingState" | "onFormControlAction" | "onFormControlChange" | "renderChartLoading" | "renderFormControl" | "renderImage" | "renderImageSelection" | "renderScroller" | "renderTableHeaderMenu" | "selectionColor" | "selectionFillColor" | "selectionHeaderColor" | "showCharts" | "showFormControls" | "showImages" | "showShapes"
 > & {
   controller: XlsxViewerController;
   palette: ViewerPalette;
@@ -7020,6 +7023,7 @@ function XlsxGrid({
   const chartPreviewRectRef = React.useRef<{ id: string; rect: XlsxImageRect } | null>(null);
   const skipNextChartClickRef = React.useRef<string | null>(null);
   const paneDrawingNodesCacheRef = React.useRef<{
+    anyDrawingsVisible: boolean;
     chartRects: Array<{ chart: XlsxChart; rect: XlsxImageRect }>;
     drawingViewportSignature: string;
     formControlItemsById: Map<string, string[]>;
@@ -7039,7 +7043,6 @@ function XlsxGrid({
     selectedImageId: string | null;
     selectionStroke: string;
     shapeRects: Array<{ rect: XlsxImageRect; shape: XlsxShape }>;
-    showImages: boolean;
     updateFormControl: XlsxViewerController["updateFormControl"];
     value: Record<FrozenDrawingPane, React.ReactNode>;
   } | null>(null);
@@ -9907,6 +9910,15 @@ function XlsxGrid({
   const trailingColumnSpacerWidth = shouldVirtualizeCols
     ? totalContentWidth - (virtualCols[virtualCols.length - 1]?.end ?? 0)
     : 0;
+  // `showImages` is the master switch for every worksheet drawing. The
+  // per-kind flags below let a host opt one kind back in (or out) without
+  // taking the rest — e.g. a citation viewer that wants charts but not the
+  // decorative shapes/form controls a financial model embeds. Each defaults to
+  // `showImages`, so existing callers keep the old all-or-nothing behavior.
+  const chartsVisible = showCharts ?? showImages;
+  const formControlsVisible = showFormControls ?? showImages;
+  const shapesVisible = showShapes ?? showImages;
+  const anyDrawingsVisible = showImages || chartsVisible || formControlsVisible || shapesVisible;
   const imageRects = React.useMemo(
     () =>
       showImages
@@ -9949,7 +9961,7 @@ function XlsxGrid({
   );
   const shapeRects = React.useMemo(
     () =>
-      showImages
+      shapesVisible
         ? shapes.map((shape) => ({
             rect: resolveAnchoredRect(shape.anchor, visibleRows, visibleCols, displayEffectiveRowHeights, displayEffectiveColWidths, {
               actualColPrefixSums,
@@ -9977,7 +9989,7 @@ function XlsxGrid({
       rowIndexByActual,
       rowPrefixSums,
       shapes,
-      showImages,
+      shapesVisible,
       visibleCols,
       visibleRows,
       zoomFactor
@@ -9985,7 +9997,7 @@ function XlsxGrid({
   );
   const formControlRects = React.useMemo(
     () =>
-      showImages
+      formControlsVisible
         ? formControls
           .filter((control) => !control.hidden)
           .map((control) => ({
@@ -10013,9 +10025,9 @@ function XlsxGrid({
       displayEffectiveRowHeights,
       displayRowHeaderWidth,
       formControls,
+      formControlsVisible,
       rowIndexByActual,
       rowPrefixSums,
-      showImages,
       visibleCols,
       visibleRows,
       zoomFactor
@@ -10023,7 +10035,7 @@ function XlsxGrid({
   );
   const chartRects = React.useMemo(
     () =>
-      showImages
+      chartsVisible
         ? charts.map((chart) => ({
             chart,
             rect:
@@ -10047,6 +10059,7 @@ function XlsxGrid({
       actualRowPrefixSums,
       chartPreviewRect,
       charts,
+      chartsVisible,
       colIndexByActual,
       colPrefixSums,
       displayHeaderHeight,
@@ -10055,13 +10068,12 @@ function XlsxGrid({
       displayRowHeaderWidth,
       rowIndexByActual,
       rowPrefixSums,
-      showImages,
       visibleCols,
       visibleRows,
       zoomFactor
     ]
   );
-  const shouldBakeCanvasStaticDrawings = Boolean(experimentalCanvas && readOnly && showImages);
+  const shouldBakeCanvasStaticDrawings = Boolean(experimentalCanvas && readOnly && anyDrawingsVisible);
   const shouldBakeCanvasImages = Boolean(shouldBakeCanvasStaticDrawings && !renderImage && !renderImageSelection);
   const bakedShapeRects = React.useMemo(
     () => (shouldBakeCanvasStaticDrawings ? shapeRects.filter(({ shape }) => !shape.hyperlink) : []),
@@ -10089,7 +10101,7 @@ function XlsxGrid({
     [imageRects, selectedImageId, shouldBakeCanvasImages]
   );
   const hasCanvasDomDrawingOverlays = Boolean(
-    showImages
+    anyDrawingsVisible
     && (
       chartRects.length > 0
       || domShapeRects.length > 0
@@ -14452,7 +14464,7 @@ function XlsxGrid({
   const previousPaneDrawingNodes = paneDrawingNodesCacheRef.current;
   const canReusePaneDrawingNodes =
     previousPaneDrawingNodes !== null
-    && previousPaneDrawingNodes.showImages === showImages
+    && previousPaneDrawingNodes.anyDrawingsVisible === anyDrawingsVisible
     && previousPaneDrawingNodes.updateFormControl === updateFormControl
     && previousPaneDrawingNodes.chartRects === chartRects
     && previousPaneDrawingNodes.formControlRects === domFormControlRects
@@ -14475,7 +14487,7 @@ function XlsxGrid({
     && previousPaneDrawingNodes.drawingViewportSignature === drawingViewportCacheSignature;
   const paneDrawingNodes = canReusePaneDrawingNodes
     ? previousPaneDrawingNodes.value
-    : (!showImages
+    : (!anyDrawingsVisible
         ? {
             corner: null,
             left: null,
@@ -14519,6 +14531,7 @@ function XlsxGrid({
 
   if (!canReusePaneDrawingNodes) {
     paneDrawingNodesCacheRef.current = {
+      anyDrawingsVisible,
       chartRects,
       drawingViewportSignature: drawingViewportCacheSignature,
       formControlItemsById,
@@ -14538,7 +14551,6 @@ function XlsxGrid({
       selectedImageId,
       selectionStroke,
       shapeRects: domShapeRects,
-      showImages,
       updateFormControl,
       value: paneDrawingNodes
     };
@@ -15353,7 +15365,7 @@ function XlsxGrid({
               width: totalWidth
             }}
           >
-            {showImages && !experimentalCanvas ? (
+            {anyDrawingsVisible && !experimentalCanvas ? (
               <>
                 <div style={topOverlayStyle}>{paneDrawingNodes.top}</div>
                 <div style={leftOverlayStyle}>{paneDrawingNodes.left}</div>
@@ -15923,7 +15935,10 @@ function XlsxViewerInner({
   selectionColor,
   selectionFillColor,
   selectionHeaderColor,
+  showCharts,
+  showFormControls,
   showImages = true,
+  showShapes,
   showDefaultToolbar = true,
   toolbar
 }: XlsxViewerProps & {
@@ -15997,7 +16012,10 @@ function XlsxViewerInner({
                 selectionColor={selectionColor}
                 selectionFillColor={selectionFillColor}
                 selectionHeaderColor={selectionHeaderColor}
+                showCharts={showCharts}
+                showFormControls={showFormControls}
                 showImages={showImages}
+                showShapes={showShapes}
               />
             </div>
           </div>
