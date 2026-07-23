@@ -1641,11 +1641,34 @@ export interface XlsxViewerProps extends UseXlsxViewerControllerOptions {
    */
   renderTableHeaderMenu?: (props: XlsxTableHeaderMenuRenderProps) => React.ReactNode;
   /**
-   * Shows worksheet images, charts, shapes, and form controls.
+   * Shows worksheet charts. Overrides `showImages` for charts only, so a host
+   * can render charts while suppressing the other drawing kinds.
+   *
+   * @default showImages
+   */
+  showCharts?: boolean;
+  /**
+   * Shows worksheet form controls (buttons, checkboxes, drop downs). Overrides
+   * `showImages` for form controls only.
+   *
+   * @default showImages
+   */
+  showFormControls?: boolean;
+  /**
+   * Shows worksheet images, charts, shapes, and form controls. Acts as the
+   * default for `showCharts`, `showFormControls`, and `showShapes`, and is the
+   * sole switch for pictures.
    *
    * @default true
    */
   showImages?: boolean;
+  /**
+   * Shows worksheet shapes (autoshapes and text boxes). Overrides `showImages`
+   * for shapes only.
+   *
+   * @default showImages
+   */
+  showShapes?: boolean;
   /**
    * Shows the built-in toolbar above the workbook grid.
    *
