@@ -1,6 +1,22 @@
 import type { XlsxChart, XlsxChartsheet, XlsxFormControl, XlsxSheetData, XlsxTable, XlsxWorkbookTab } from "./types";
 import { getConfiguredWorkerWasmSource, type WorkerWasmSource } from "./wasm";
 
+/** What the worker's `load` returns: everything the grid renders from. */
+export type XlsxWorkerLoadSnapshot = {
+  chartsByWorkbookSheetIndex: XlsxChart[][];
+  chartsheets: XlsxChartsheet[];
+  formControlsByWorkbookSheetIndex: XlsxFormControl[][];
+  sheets: XlsxSheetData[];
+  tablesByWorkbookSheetIndex: XlsxTable[][];
+  tabs: XlsxWorkbookTab[];
+};
+
+/** What the worker's `parseCharts` returns: the chart half of a load. */
+export type XlsxWorkerChartsSnapshot = Pick<
+  XlsxWorkerLoadSnapshot,
+  "chartsByWorkbookSheetIndex" | "chartsheets" | "tabs"
+>;
+
 type WorkerMessage =
   | {
       id: number;
@@ -45,23 +61,12 @@ type WorkerSuccessMessage =
   | {
       id: number;
       success: true;
-      result: {
-        chartsByWorkbookSheetIndex: XlsxChart[][];
-        chartsheets: XlsxChartsheet[];
-        tabs: XlsxWorkbookTab[];
-      };
+      result: XlsxWorkerChartsSnapshot;
     }
   | {
       id: number;
       success: true;
-      result: {
-        chartsByWorkbookSheetIndex: XlsxChart[][];
-        chartsheets: XlsxChartsheet[];
-        formControlsByWorkbookSheetIndex: XlsxFormControl[][];
-        sheets: XlsxSheetData[];
-        tablesByWorkbookSheetIndex: XlsxTable[][];
-        tabs: XlsxWorkbookTab[];
-      };
+      result: XlsxWorkerLoadSnapshot;
     }
   | {
       id: number;
@@ -133,14 +138,7 @@ export class XlsxWorkerClient {
 
   loadWorkbook(buffer: ArrayBuffer, skipXmlParsing = false, showHiddenSheets = false) {
     const workerBuffer = cloneArrayBufferForTransfer(buffer);
-    return this.request<{
-      chartsByWorkbookSheetIndex: XlsxChart[][];
-      chartsheets: XlsxChartsheet[];
-      formControlsByWorkbookSheetIndex: XlsxFormControl[][];
-      sheets: XlsxSheetData[];
-      tablesByWorkbookSheetIndex: XlsxTable[][];
-      tabs: XlsxWorkbookTab[];
-    }>({
+    return this.request<XlsxWorkerLoadSnapshot>({
       id: 0,
       payload: {
         buffer: workerBuffer,
@@ -165,11 +163,7 @@ export class XlsxWorkerClient {
 
   parseCharts(buffer: ArrayBuffer, skipXmlParsing = false, showHiddenSheets = false) {
     const workerBuffer = cloneArrayBufferForTransfer(buffer);
-    return this.request<{
-      chartsByWorkbookSheetIndex: XlsxChart[][];
-      chartsheets: XlsxChartsheet[];
-      tabs: XlsxWorkbookTab[];
-    }>({
+    return this.request<XlsxWorkerChartsSnapshot>({
       id: 0,
       payload: {
         buffer: workerBuffer,

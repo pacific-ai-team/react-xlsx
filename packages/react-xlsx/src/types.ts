@@ -948,6 +948,16 @@ export interface UseXlsxViewerControllerOptions {
    */
   deferLoadingAboveBytes?: number;
   /**
+   * Parses images, shapes and their anchors from the workbook archive after a
+   * worker load. That parse unzips the whole workbook on the main thread, which
+   * blocks the UI for seconds on a large sheet. A viewer that renders no images
+   * or shapes (`showImages={false}`) can pass `false` to skip it; charts, form
+   * controls and cell styles come from the worker either way.
+   *
+   * @default true
+   */
+  loadDrawingAssets?: boolean;
+  /**
    * Local workbook bytes to load. Use either `file` or `src`.
    *
    * @example
