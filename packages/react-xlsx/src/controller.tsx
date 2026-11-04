@@ -1832,6 +1832,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
     deferLoadingAboveBytes = DEFAULT_DEFER_LOADING_ABOVE_BYTES,
     file,
     fileName,
+    loadDrawingAssets = true,
     maxFileSizeBytes = DEFAULT_MAX_FILE_SIZE_BYTES,
     readOnly: requestedReadOnly = false,
     readOnlyAboveBytes = 0,
@@ -2281,7 +2282,9 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
               throw new Error("Worker chart payload incomplete");
             }
 
-            const workerImageAssets = effectiveSkipXmlParsing
+            // Unzips the whole workbook on the main thread; on a large sheet that
+            // is seconds of blocked UI, so a viewer that shows no drawings skips it.
+            const workerImageAssets = effectiveSkipXmlParsing || !loadDrawingAssets
               ? null
               : parseWorkbookImageAssets(new Uint8Array(buffer));
             if (!isCurrent || abortController.signal.aborted) {
@@ -2371,6 +2374,7 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
     file,
     getWorkerClient,
     hasIncompleteWorkerChartSnapshot,
+    loadDrawingAssets,
     loadWorkbookOnMainThread,
     maxFileSizeBytes,
     setImageAssets,
