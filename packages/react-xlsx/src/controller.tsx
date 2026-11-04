@@ -47,7 +47,7 @@ import {
 } from "./images";
 import { safeCalculate, tryRecalculate } from "./safe-calculate";
 import { canUseConfiguredWasmSourceInWorker, getSheetsWasmModule } from "./wasm";
-import { XlsxWorkerClient } from "./worker-client";
+import { XlsxWorkerClient, type XlsxWorkerLoadSnapshot } from "./worker-client";
 import type {
   UseXlsxViewerControllerOptions,
   XlsxChart,
@@ -1826,6 +1826,33 @@ function downloadUrl(src: string, fileName: string) {
   anchor.remove();
 }
 
+/**
+ * The state a worker-backed load hands the grid. Sheets (with their cell
+ * styles), charts, form controls, tabs and tables come from the worker's
+ * snapshot. Images and shapes need a second, main-thread unzip of the whole
+ * workbook, which `loadDrawingAssets: false` skips.
+ */
+export function resolveWorkerLoadAssets({
+  snapshot,
+  buffer,
+  skipXmlParsing,
+  loadDrawingAssets
+}: {
+  snapshot: XlsxWorkerLoadSnapshot;
+  buffer: ArrayBuffer;
+  skipXmlParsing: boolean;
+  loadDrawingAssets: boolean;
+}): XlsxWorkerLoadSnapshot & { imageAssets: WorkbookImageAssets | null } {
+  return {
+    ...snapshot,
+    // Unzips the whole workbook on the main thread; on a large sheet that is
+    // seconds of blocked UI, so a viewer that shows no drawings skips it.
+    imageAssets: skipXmlParsing || !loadDrawingAssets
+      ? null
+      : parseWorkbookImageAssets(new Uint8Array(buffer))
+  };
+}
+
 export function useXlsxViewerController(options: UseXlsxViewerControllerOptions): XlsxViewerController {
   const {
     allowResizeInReadOnly = false,
@@ -2282,25 +2309,26 @@ export function useXlsxViewerController(options: UseXlsxViewerControllerOptions)
               throw new Error("Worker chart payload incomplete");
             }
 
-            // Unzips the whole workbook on the main thread; on a large sheet that
-            // is seconds of blocked UI, so a viewer that shows no drawings skips it.
-            const workerImageAssets = effectiveSkipXmlParsing || !loadDrawingAssets
-              ? null
-              : parseWorkbookImageAssets(new Uint8Array(buffer));
+            const loaded = resolveWorkerLoadAssets({
+              snapshot,
+              buffer,
+              skipXmlParsing: effectiveSkipXmlParsing,
+              loadDrawingAssets
+            });
             if (!isCurrent || abortController.signal.aborted) {
-              revokeWorkbookImageAssets(workerImageAssets);
+              revokeWorkbookImageAssets(loaded.imageAssets);
               return;
             }
 
-            setImageAssets(workerImageAssets);
-            setFormControlsByWorkbookSheetIndex(snapshot.formControlsByWorkbookSheetIndex);
+            setImageAssets(loaded.imageAssets);
+            setFormControlsByWorkbookSheetIndex(loaded.formControlsByWorkbookSheetIndex);
             setWorkbook(null);
-            setSheets(snapshot.sheets);
-            setChartsByWorkbookSheetIndex(snapshot.chartsByWorkbookSheetIndex);
-            setChartsheets(snapshot.chartsheets);
-            setTabs(snapshot.tabs);
+            setSheets(loaded.sheets);
+            setChartsByWorkbookSheetIndex(loaded.chartsByWorkbookSheetIndex);
+            setChartsheets(loaded.chartsheets);
+            setTabs(loaded.tabs);
             chartAssetsRef.current = null;
-            setWorkerTablesByWorkbookSheetIndex(snapshot.tablesByWorkbookSheetIndex);
+            setWorkerTablesByWorkbookSheetIndex(loaded.tablesByWorkbookSheetIndex);
             setShouldAutoCalculate(false);
             setIsWorkerBacked(true);
             setSortState(null);

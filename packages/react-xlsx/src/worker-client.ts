@@ -1,6 +1,16 @@
 import type { XlsxChart, XlsxChartsheet, XlsxFormControl, XlsxSheetData, XlsxTable, XlsxWorkbookTab } from "./types";
 import { getConfiguredWorkerWasmSource, type WorkerWasmSource } from "./wasm";
 
+/** What the worker's `load` returns: everything the grid renders from. */
+export type XlsxWorkerLoadSnapshot = {
+  chartsByWorkbookSheetIndex: XlsxChart[][];
+  chartsheets: XlsxChartsheet[];
+  formControlsByWorkbookSheetIndex: XlsxFormControl[][];
+  sheets: XlsxSheetData[];
+  tablesByWorkbookSheetIndex: XlsxTable[][];
+  tabs: XlsxWorkbookTab[];
+};
+
 type WorkerMessage =
   | {
       id: number;
@@ -133,14 +143,7 @@ export class XlsxWorkerClient {
 
   loadWorkbook(buffer: ArrayBuffer, skipXmlParsing = false, showHiddenSheets = false) {
     const workerBuffer = cloneArrayBufferForTransfer(buffer);
-    return this.request<{
-      chartsByWorkbookSheetIndex: XlsxChart[][];
-      chartsheets: XlsxChartsheet[];
-      formControlsByWorkbookSheetIndex: XlsxFormControl[][];
-      sheets: XlsxSheetData[];
-      tablesByWorkbookSheetIndex: XlsxTable[][];
-      tabs: XlsxWorkbookTab[];
-    }>({
+    return this.request<XlsxWorkerLoadSnapshot>({
       id: 0,
       payload: {
         buffer: workerBuffer,
