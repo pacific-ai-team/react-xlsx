@@ -45,6 +45,8 @@ jobs:
           restore-keys: |
             ts-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml') }}-
 
+      # The playground imports the library's source through a tsconfig alias.
+      # TypeScript walks that dependency even when only library files changed.
       - name: Typecheck
         run: pnpm typecheck
 
