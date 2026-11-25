@@ -8,7 +8,7 @@
     "build": "node scripts/copy-duke-wasm.mjs && tsc -p tsconfig.json --noEmit && vite build",
     "clean": "rm -rf dist",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit --incremental --tsBuildInfoFile node_modules/.cache/typecheck.tsbuildinfo"
   },
   "dependencies": {
     "@base-ui/react": "^1.2.0",
