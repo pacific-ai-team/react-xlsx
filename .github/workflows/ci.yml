@@ -26,6 +26,7 @@ jobs:
           version: 9.15.0
 
       - name: Set up Node
+        id: node
         uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -34,6 +35,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Restore TypeScript build information
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            packages/react-xlsx/node_modules/.cache/typecheck.tsbuildinfo
+            apps/playground/node_modules/.cache/typecheck.tsbuildinfo
+          key: ts-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            ts-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml') }}-
+
+      # The playground imports the library's source through a tsconfig alias.
+      # TypeScript walks that dependency even when only library files changed.
       - name: Typecheck
         run: pnpm typecheck
 

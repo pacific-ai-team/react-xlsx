@@ -63,7 +63,7 @@
   },
   "scripts": {
     "build": "tsup --config tsup.config.ts && node ../../scripts/copy-duke-wasm.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit --incremental --tsBuildInfoFile node_modules/.cache/typecheck.tsbuildinfo",
     "clean": "rm -rf dist",
     "test": "vitest run"
   },
